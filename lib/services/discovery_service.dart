@@ -22,22 +22,28 @@ class DiscoveryService {
       debugPrint('Discovery Socket bound to ${_socket!.address.address}:${_socket!.port}');
 
       _socket!.listen((RawSocketEvent event) {
+        debugPrint("Socket Event: $event"); // Log every event
         if (event == RawSocketEvent.read) {
           final datagram = _socket!.receive();
           if (datagram != null) {
             _handleMessage(datagram);
+          } else {
+             debugPrint("Socket Data was NULL");
           }
         }
       });
 
-      _sendDiscoveryPacket();
+      await _sendDiscoveryPacket();
     } catch (e) {
-      debugPrint("Error binding discovery socket: $e");
+      debugPrint("Error binding discovery socket 6970: $e");
       // Fallback to random port?
       try {
         _socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
         _socket!.broadcastEnabled = true;
-         _socket!.listen((RawSocketEvent event) {
+        debugPrint('Fallback Socket bound to ${_socket!.address.address}:${_socket!.port}');
+
+        _socket!.listen((RawSocketEvent event) {
+            debugPrint("Fallback Socket Event: $event");
             if (event == RawSocketEvent.read) {
               final datagram = _socket!.receive();
               if (datagram != null) {
@@ -45,18 +51,18 @@ class DiscoveryService {
               }
             }
           });
-        _sendDiscoveryPacket();
+        await _sendDiscoveryPacket();
       } catch (e2) {
          debugPrint("Error binding random socket: $e2");
       }
     }
   }
 
-  void _sendDiscoveryPacket() {
+  Future<void> _sendDiscoveryPacket() async {
     if (_socket == null) return;
     final data = utf8.encode('KINCOM_DISCOVER');
     
-    // Broadcast to 255.255.255.255 port 6969
+    // 1. Send to Global Broadcast (255.255.255.255) - Works on some routers
     try {
       _socket!.send(data, InternetAddress('255.255.255.255'), 6969);
       debugPrint("Sent Global Broadcast KINCOM_DISCOVER");
@@ -64,14 +70,43 @@ class DiscoveryService {
       debugPrint("Error sending global broadcast: $e");
     }
 
-    // TODO: Determine network specific broadcast addresses if global fails or isn't routed.
-    // For now, global broadcast is often sufficient on local LANs.
+    // 2. Iterate Interfaces and send to subnet broadcast
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLinkLocal: false,
+      );
+
+      for (var interface in interfaces) {
+        for (var address in interface.addresses) {
+          if (address.type == InternetAddressType.IPv4) {
+             // Basic subnet broadcast assumption (x.x.x.255) is often enough for home nets
+             // But correct way involves subnet mask which isn't easily exposed in Dart standard lib without calculation assumption
+             // We'll try the .255 approach for the last octet as a heuristic fallback if standard Broadcast fails
+             
+             final ipParts = address.address.split('.');
+             if (ipParts.length == 4) {
+                ipParts[3] = '255';
+                final broadcast = ipParts.join('.');
+                try {
+                  _socket!.send(data, InternetAddress(broadcast), 6969);
+                  debugPrint("Sent Broadcast to $broadcast on ${interface.name}");
+                } catch (e) {
+                   // ignore
+                }
+             }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("Error iterating interfaces: $e");
+    }
   }
 
   void _handleMessage(Datagram datagram) {
     try {
       final message = utf8.decode(datagram.data);
-      debugPrint("UDP Message from ${datagram.address.address}: $message");
+      debugPrint("RAW UDP from ${datagram.address.address}: '$message'");
 
       if (message.startsWith('{')) {
         final Map<String, dynamic> json = jsonDecode(message);

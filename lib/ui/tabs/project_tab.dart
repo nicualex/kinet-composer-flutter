@@ -163,7 +163,9 @@ class _ProjectTabState extends State<ProjectTab> {
                       ),
                       const SizedBox(width: 8),
                       ElevatedButton.icon(
-                        onPressed: () => showState.saveShow(),
+                        onPressed: (showState.currentShow != null && showState.currentShow!.mediaFile.isNotEmpty)
+                            ? () => showState.saveShow()
+                            : null,
                         icon: const Icon(Icons.save),
                         label: const Text('Save'),
                       ),
@@ -201,8 +203,33 @@ class _ProjectTabState extends State<ProjectTab> {
                   leading: const Icon(Icons.tv),
                   title: Text(device.name),
                   subtitle: Text('${device.ip} (Kinet V${device.protocol})'),
+                  onTap: () async {
+                     final confirm = await showDialog<bool>(
+                       context: context,
+                       builder: (c) => AlertDialog(
+                         title: Text("Import '${device.name}'?"),
+                         content: Text("Do you want to use this device's configuration?\n\nDimensions: ${device.width} x ${device.height}\nIP: ${device.ip}"),
+                         actions: [
+                           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text("Cancel")),
+                           ElevatedButton(
+                             onPressed: () => Navigator.pop(c, true), 
+                             child: const Text("Use Device")
+                           ),
+                         ],
+                       ),
+                     );
+
+                     if (confirm == true && context.mounted) {
+                        showState.importFixture(device);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text("Imported ${device.name} settings"))
+                        );
+                     }
+                  },
                   trailing: ElevatedButton(
-                    onPressed: () => _uploadShow(device.ip),
+                    onPressed: (showState.currentShow != null && showState.currentShow!.mediaFile.isNotEmpty)
+                        ? () => _uploadShow(device.ip)
+                        : null,
                     child: const Text('Upload Show'),
                   ),
                 );

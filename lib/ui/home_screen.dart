@@ -15,7 +15,7 @@ class HomeScreen extends StatelessWidget {
           title: const Text('Kinet Composer'),
           bottom: const TabBar(
             tabs: [
-              Tab(icon: Icon(Icons.publish), text: 'Project'),
+              Tab(icon: Icon(Icons.slideshow), text: 'Shows'), // Renamed from Project
               Tab(icon: Icon(Icons.grid_on), text: 'Setup'),
               Tab(icon: Icon(Icons.movie_creation), text: 'Videos / Effects'),
             ],

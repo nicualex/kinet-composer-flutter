@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
-import 'package:kinet_composer/models/show_manifest.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:archive/archive_io.dart'; 
+import 'package:path/path.dart' as p;
+import '../models/show_manifest.dart';
 
 class ShowState extends ChangeNotifier {
   ShowManifest? _currentShow;
@@ -152,7 +154,7 @@ class ShowState extends ChangeNotifier {
     }
   }
 
-  void updateTransform(MediaTransform transform) {
+  void updateTransform(MediaTransform? transform) {
      if (_currentShow != null) {
       _currentShow = ShowManifest(
         version: _currentShow!.version,
@@ -160,6 +162,21 @@ class ShowState extends ChangeNotifier {
         mediaFile: _currentShow!.mediaFile,
         mediaTransform: transform,
         fixtures: _currentShow!.fixtures,
+        settings: _currentShow!.settings,
+      );
+      _isModified = true;
+      notifyListeners();
+    }
+  }
+
+  void importFixture(Fixture fixture) {
+    if (_currentShow != null) {
+      _currentShow = ShowManifest(
+        version: _currentShow!.version,
+        name: _currentShow!.name,
+        mediaFile: _currentShow!.mediaFile,
+        mediaTransform: _currentShow!.mediaTransform,
+        fixtures: [fixture], // Replace existing fixtures with the imported one
         settings: _currentShow!.settings,
       );
       _isModified = true;
@@ -217,5 +234,55 @@ class ShowState extends ChangeNotifier {
     );
     _isModified = true;
     notifyListeners();
+  }
+
+  // --- BUNDLING FOR TRANSFER ---
+  Future<File> createShowBundle(File thumbnail) async {
+      if (_currentShow == null) throw Exception("No show loaded");
+
+      try {
+        final encoder = ZipFileEncoder();
+        final tempDir = await getTemporaryDirectory();
+        final bundlePath = '${tempDir.path}/bundle_${DateTime.now().millisecondsSinceEpoch}.kshow';
+        
+        encoder.create(bundlePath);
+        
+        // 1. Add Thumbnail
+        encoder.addFile(thumbnail, 'thumbnail.png');
+        
+        // 2. Add Media File
+        if (_currentShow!.mediaFile.isNotEmpty) {
+           final mediaPath = _currentShow!.mediaFile;
+           final mediaFile = File(mediaPath);
+           if (await mediaFile.exists()) {
+              encoder.addFile(mediaFile, 'media${p.extension(mediaPath)}');
+              
+              // Update Manifest to point to relative path "media.ext"
+              // But we don't want to change the *current* state.
+              // So create a copy of manifest.
+              final exportManifest = ShowManifest(
+                version: _currentShow!.version,
+                name: _currentShow!.name,
+                mediaFile: 'media${p.extension(mediaPath)}', // Relative path in zip
+                mediaTransform: _currentShow!.mediaTransform,
+                fixtures: _currentShow!.fixtures,
+                settings: _currentShow!.settings
+              );
+              
+              // 3. Add Manifest
+              final jsonStr = jsonEncode(exportManifest.toJson());
+              // Save temp manifest
+              final manifestFile = File('${tempDir.path}/manifest.json');
+              await manifestFile.writeAsString(jsonStr);
+              encoder.addFile(manifestFile);
+           }
+        }
+        
+        encoder.close();
+        return File(bundlePath);
+      } catch (e) {
+        debugPrint("Bundling error: $e");
+        rethrow;
+      }
   }
 }

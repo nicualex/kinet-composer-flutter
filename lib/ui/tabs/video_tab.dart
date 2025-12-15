@@ -1,19 +1,25 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart'; // For ByteData
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/show_manifest.dart';
 import '../../state/show_state.dart';
-import 'package:kinet_composer/ui/widgets/transform_gizmo.dart';
 import '../../services/effect_service.dart';
+import '../widgets/pixel_grid_painter.dart';
+import '../widgets/transform_gizmo.dart';
 import '../widgets/effect_renderer.dart';
-import 'package:kinet_composer/ui/widgets/pixel_grid_painter.dart';
+import '../widgets/transfer_dialog.dart';
+
 // Enum removed, using from transform_gizmo.dart
 
 class VideoTab extends StatefulWidget {
@@ -46,6 +52,11 @@ class _VideoTabState extends State<VideoTab> {
   // NEW: Effects State
   EffectType? _selectedEffect;
   Map<String, double> _effectParams = {};
+  
+  final GlobalKey _previewKey = GlobalKey(); // For Snapshot
+  
+  // Debounce for fit
+  Timer? _fitDebounce;
 
   @override
   void initState() {
@@ -223,7 +234,8 @@ class _VideoTabState extends State<VideoTab> {
 
      try {
         final filter = EffectService.getFFmpegFilter(_selectedEffect!, _effectParams);
-        const String ffmpegPath = r'C:\Users\nicua\Documents\Development\ffmpeg-master-latest-win64-gpl-shared\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe';
+        // Corrected path - removed duplicate folder
+        const String ffmpegPath = r'C:\Users\nicua\Documents\Development\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe';
         
         // Parse source to separate -i and -vf for robustness
         String source = "color=c=black:s=1920x1080";
@@ -272,6 +284,48 @@ class _VideoTabState extends State<VideoTab> {
         if(mounted) Navigator.pop(context);
         debugPrint("Effect Export Error: $e");
      }
+  }
+
+
+
+  // --- THUMBNAIL GENERATION ---
+  Future<File?> _captureThumbnail() async {
+     try {
+       RenderRepaintBoundary? boundary = _previewKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+       if (boundary == null) return null;
+       
+       // Capture image
+       ui.Image image = await boundary.toImage(pixelRatio: 0.5); // 0.5 for efficiency
+       ByteData? byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+       if (byteData == null) return null;
+       
+       // Save to temp
+       final tempDir = await getTemporaryDirectory();
+       final file = File('${tempDir.path}/thumbnail.png');
+       await file.writeAsBytes(byteData.buffer.asUint8List());
+       return file;
+     } catch (e) {
+       debugPrint("Thumbnail Error: $e");
+       return null;
+     }
+  }
+
+  Future<void> _showTransferDialog() async {
+     // 1. Capture Thumbnail
+     final thumb = await _captureThumbnail();
+     if (thumb == null) {
+       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Failed to capture thumbnail")));
+       return;
+     }
+
+     if (!mounted) return;
+     
+     // 2. Show Dialog
+     showDialog(
+       context: context,
+       barrierDismissible: false,
+       builder: (c) => TransferDialog(thumbnail: thumb),
+     );
   }
 
   Future<void> _exportVideo() async {
@@ -340,7 +394,8 @@ class _VideoTabState extends State<VideoTab> {
 
       String filterString = filters.join(',');
       
-      const String ffmpegPath = r'C:\Users\nicua\Documents\Development\ffmpeg-master-latest-win64-gpl-shared\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe';
+      // Corrected path - removed duplicate folder
+      const String ffmpegPath = r'C:\Users\nicua\Documents\Development\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe';
 
       List<String> args = [
         '-i', show.mediaFile,
@@ -405,7 +460,7 @@ class _VideoTabState extends State<VideoTab> {
                 translateY: 0.0,
                 rotation: 0.0);
 
-        final transform = _isEditingCrop ? (_tempTransform ?? baseTransform) : baseTransform;
+        final transform = baseTransform;
 
         return Row(
           children: [
@@ -413,8 +468,10 @@ class _VideoTabState extends State<VideoTab> {
             Expanded(
               child: Container(
                 color: Colors.black87,
-                child: ClipRect(
-                  child: Stack(
+                child: RepaintBoundary(
+                  key: _previewKey,
+                  child: ClipRect(
+                    child: Stack(
                     alignment: Alignment.center,
                     children: [
                       // GRID BACKGROUND
@@ -462,13 +519,7 @@ class _VideoTabState extends State<VideoTab> {
                           editMode: _editMode,
                           lockAspect: _lockAspectRatio,
                           onUpdate: (newTransform) {
-                             if (_isEditingCrop) {
-                               setState(() {
-                                 _tempTransform = newTransform;
-                               });
-                             } else {
                                showState.updateTransform(newTransform);
-                             }
                           },
                           // CHILD SELECT
                           child: (_selectedEffect != null) 
@@ -506,291 +557,292 @@ class _VideoTabState extends State<VideoTab> {
                 ),
               ),
             ),
+          ),
 
-            // Properties Panel
+            // NEW: Modern Sidebar
             Container(
-              width: 300,
+              width: 320,
               decoration: BoxDecoration(
-                color: Colors.grey[900],
-                border: const Border(
-                  left: BorderSide(color: Colors.white24),
-                ),
+                color: const Color(0xFF1E1E1E), // Dark charcoal
+                border: const Border(left: BorderSide(color: Colors.white12)),
+                boxShadow: [
+                   BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 10, offset: const Offset(-2, 0))
+                ]
               ),
-              padding: const EdgeInsets.all(16.0),
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                   Text("Videos / Effects",
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          color: Colors.white, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 20),
-                  
-                  // Top Actions
-                  Row(
-                    children: [
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: () => _pickVideo(context),
-                          icon: const Icon(Icons.folder_open, size: 18),
-                          label: const Text("Load Video"),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: () => (_selectedEffect != null) ? _exportEffect() : _exportVideo(),
-                          icon: const Icon(Icons.save, size: 18),
-                          label: const Text("Save Video"),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                   // 1. Header
+                   Text("Project", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                   const SizedBox(height: 4),
+                   Text(show.name, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+                   const SizedBox(height: 24),
 
-                  // EFFECTS LIBRARY
-                  const Text("Effects Library", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    height: 80,
-                    child: ListView(
-                      scrollDirection: Axis.horizontal,
-                      children: EffectService.effects.map((e) {
-                         bool isSelected = _selectedEffect == e.type;
-                         return Padding(
-                           padding: const EdgeInsets.only(right: 8.0),
-                           child: InkWell(
-                             onTap: () {
-                                setState(() {
-                                   _selectedEffect = e.type;
-                                   _effectParams = Map.from(e.defaultParams);
-                                   // Stop player
-                                   if (player.state.playing) player.pause();
-                                   _isPlaying = true; // Auto play effect
-                                   _isEditingCrop = false; // Reset crop
-                                });
-                             },
+                   // 2. Primary Actions (Grid)
+                   GridView.count(
+                     crossAxisCount: 2,
+                     crossAxisSpacing: 10,
+                     mainAxisSpacing: 10,
+                     shrinkWrap: true, // Vital for nesting in Column
+                     childAspectRatio: 1.3,
+                     children: [
+                        _buildModernButton(
+                          icon: Icons.folder_open, 
+                          label: "Load Video", 
+                          color: const Color(0xFF90CAF9), // Pastel Blue
+                          onTap: () => _pickVideo(context)
+                        ),
+                        _buildModernButton(
+                          icon: Icons.save, 
+                          label: "Save Video", 
+                          color: const Color(0xFFA5D6A7), // Pastel Green
+                          isEnabled: show.mediaFile.isNotEmpty || _selectedEffect != null,
+                          onTap: () => (_selectedEffect != null) ? _exportEffect() : _exportVideo()
+                        ),
+                        // Full width transfer button? Or just another tile.
+                        _buildModernButton(
+                          icon: Icons.upload_file, 
+                          label: "Transfer", 
+                          color: const Color(0xFFCE93D8), // Pastel Purple
+                          isEnabled: show.mediaFile.isNotEmpty,
+                          onTap: _showTransferDialog
+                        ),
+                     ],
+                   ),
+                   const SizedBox(height: 32),
+
+                   // 2.5 Playback Controls
+                   if (show.mediaFile.isNotEmpty) ...[
+                      Text("PLAYBACK", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                           Expanded(
                              child: Container(
-                               width: 70,
-                               decoration: BoxDecoration(
-                                 color: isSelected ? Colors.blueAccent : Colors.grey[800],
-                                 borderRadius: BorderRadius.circular(8),
-                                 border: isSelected ? Border.all(color: Colors.white) : null,
-                               ),
-                               child: Column(
-                                 mainAxisAlignment: MainAxisAlignment.center,
+                               decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8)),
+                               child: Row(
+                                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                                  children: [
-                                   Icon(e.icon, color: Colors.white),
-                                   const SizedBox(height: 4),
-                                   Text(e.name, 
-                                      textAlign: TextAlign.center,
-                                      style: const TextStyle(color: Colors.white, fontSize: 10),
-                                      maxLines: 2, overflow: TextOverflow.ellipsis),
+                                   IconButton(
+                                     onPressed: () => player.playOrPause(),
+                                     icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
+                                     color: Colors.white,
+                                     tooltip: _isPlaying ? "Pause" : "Play",
+                                   ),
+                                   IconButton(
+                                     onPressed: () async {
+                                       await player.seek(Duration.zero);
+                                       await player.pause();
+                                     },
+                                     icon: const Icon(Icons.stop),
+                                     color: Colors.redAccent,
+                                     tooltip: "Stop",
+                                   ),
                                  ],
                                ),
                              ),
-                           ),
-                         );
-                      }).toList(),
-                    ),
-                  ),
+                           )
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                   ],
 
-                  const Divider(color: Colors.white24, height: 20),
-
-                  if (_selectedEffect != null) ...[
-                      // EFFECT CONTROLS
+                   // 3. Edit Modes
+                   if (show.mediaFile.isNotEmpty) ...[
+                      Text("EDIT TOOLS", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 12),
                       Row(
                         children: [
-                           Expanded(child: Text("Active: ${_selectedEffect!.name.toUpperCase()}", style: const TextStyle(color: Colors.greenAccent))),
-                           IconButton(
-                             icon: const Icon(Icons.close, color: Colors.grey),
-                             onPressed: () => setState(() => _selectedEffect = null),
-                             tooltip: "Close Effect",
-                           )
+                          _buildToggle(Icons.zoom_in, "Zoom/Pan", _isEditingCrop && _editMode == EditMode.zoom, () {
+                             setState(() {
+                               if (_isEditingCrop && _editMode == EditMode.zoom) {
+                                 _isEditingCrop = false;
+                               } else {
+                                 _isEditingCrop = true;
+                                 _editMode = EditMode.zoom;
+                               }
+                             });
+                          }),
+                          const SizedBox(width: 8),
+                          _buildToggle(Icons.crop, "Crop", _isEditingCrop && _editMode == EditMode.crop, () {
+                             setState(() {
+                               if (_isEditingCrop && _editMode == EditMode.crop) {
+                                 _isEditingCrop = false;
+                               } else {
+                                 // Initialize default crop if null
+                                 if (show.mediaTransform?.crop == null) {
+                                    final t = show.mediaTransform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
+                                    showState.updateTransform(MediaTransform(
+                                       scaleX: t.scaleX, scaleY: t.scaleY, 
+                                       translateX: t.translateX, translateY: t.translateY, 
+                                       rotation: t.rotation,
+                                       crop: CropInfo(x: 10, y: 10, width: 80, height: 80)
+                                    ));
+                                 }
+                                 
+                                 _isEditingCrop = true;
+                                 _editMode = EditMode.crop;
+                               }
+                             });
+                          }),
                         ],
                       ),
-                      const SizedBox(height: 10),
-                      ..._effectParams.keys.map((key) {
-                           final def = EffectService.effects.firstWhere((e) => e.type == _selectedEffect);
-                           double min = def.minParams[key] ?? 0.0;
-                           double max = def.maxParams[key] ?? 1.0;
-                           
-                           return Column(
-                             crossAxisAlignment: CrossAxisAlignment.start,
-                             children: [
-                               Text("$key: ${_effectParams[key]!.toStringAsFixed(1)}", style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                               Slider(
-                                 value: _effectParams[key]!,
-                                 min: min,
-                                 max: max,
-                                 onChanged: (v) => setState(() => _effectParams[key] = v),
-                               ),
-                             ],
-                           );
-                      }),
-                      
-                      const SizedBox(height: 10),
-                      ElevatedButton.icon(
-                        onPressed: _exportEffect,
-                        icon: const Icon(Icons.save_as),
-                        label: const Text("Render & Save Effect"),
-                        style: ElevatedButton.styleFrom(backgroundColor: Colors.blue),
+                      const SizedBox(height: 12),
+                      Row(
+                         children: [
+                            Text("Lock Aspect", style: const TextStyle(color: Colors.white70)),
+                            const Spacer(),
+                            Switch(
+                              value: _lockAspectRatio, 
+                              activeColor:  const Color(0xFF90CAF9),
+                              onChanged: (v) => setState(() => _lockAspectRatio = v)
+                            ),
+                         ],
                       ),
-                  ] else if (show.mediaFile.isNotEmpty) ...[
-                    // ... EXISTING VIDEO UI ...
-                    Text("Source: ${show.mediaFile.split(Platform.pathSeparator).last}",
-                        style: const TextStyle(color: Colors.grey)),
-                    const Divider(color: Colors.white24, height: 20),
+                      const Divider(color: Colors.white12, height: 32),
+                   ],
 
-                    const Text("Playback", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 10),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                         IconButton(
-                           icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
-                           color: Colors.white,
-                           onPressed: () => player.playOrPause(),
-                         ),
-                         IconButton(
-                           icon: const Icon(Icons.stop),
-                           color: Colors.red,
-                           onPressed: () async {
-                             await player.seek(Duration.zero);
-                             await player.pause();
-                           },
-                         ),
-                      ],
-                    ),
-                    
-                    const Divider(color: Colors.white24, height: 20),
-                    const Text("Editing", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 10),
-                    
-                    if (_isEditingCrop) ...[
-                        // Edit Mode Toggle
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            ChoiceChip(
-                              label: const Text("Zoom / Scale"),
-                              selected: _editMode == EditMode.zoom,
-                              onSelected: (v) => setState(() => _editMode = EditMode.zoom),
-                            ),
-                            ChoiceChip(
-                              label: const Text("Crop"),
-                              selected: _editMode == EditMode.crop,
-                              onSelected: (v) => setState(() => _editMode = EditMode.crop),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 10),
-
-                        // Aspect Radio Lock Toggle (Only in Zoom Mode)
-                        if (_editMode == EditMode.zoom) ...[
-                             Row(
-                               children: [
-                                  Checkbox(
-                                    value: _lockAspectRatio, 
-                                    onChanged: (v) => setState(() => _lockAspectRatio = v ?? true),
-                                    fillColor: MaterialStateProperty.all(Colors.blueAccent),
-                                  ),
-                                  const Text("Lock Aspect Ratio", style: TextStyle(color: Colors.white)),
-                               ],
-                             ),
-                             const SizedBox(height: 10),
-                        ],
-
-                        Row(
-                          children: [
-                            Expanded(
-                              child: ElevatedButton.icon(
-                                onPressed: () {
-                                  if (_tempTransform != null) {
-                                    showState.updateTransform(_tempTransform!);
-                                  }
-                                  setState(() {
-                                    _isEditingCrop = false;
-                                    _tempTransform = null;
-                                  });
-                                },
-                                style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-                                icon: const Icon(Icons.check),
-                                label: const Text("Apply"),
+                   // 4. Effects or Effect Controls
+                   if (_selectedEffect != null) ...[
+                      Text("EFFECT SETTINGS: ${_selectedEffect!.name.toUpperCase()}", style: const TextStyle(color: Color(0xFFA5D6A7), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 12),
+                       
+                      Expanded(
+                        child: SingleChildScrollView(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                               ..._effectParams.keys.map((key) {
+                                   final def = EffectService.effects.firstWhere((e) => e.type == _selectedEffect);
+                                   double min = def.minParams[key] ?? 0.0;
+                                   double max = def.maxParams[key] ?? 1.0;
+                                   
+                                   return Column(
+                                     crossAxisAlignment: CrossAxisAlignment.start,
+                                     children: [
+                                       Text("$key: ${_effectParams[key]!.toStringAsFixed(2)}", style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                                       Slider(
+                                         value: _effectParams[key]!,
+                                         min: min,
+                                         max: max,
+                                         activeColor: const Color(0xFF90CAF9),
+                                         inactiveColor: Colors.white12,
+                                         onChanged: (v) => setState(() => _effectParams[key] = v),
+                                       ),
+                                     ],
+                                   );
+                              }),
+                              const SizedBox(height: 20),
+                              _buildModernButton(
+                                icon: Icons.check, 
+                                label: "Apply & Close", 
+                                color: const Color(0xFF90CAF9),
+                                onTap: () => setState(() => _selectedEffect = null), // Or just deselect to view
                               ),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: ElevatedButton.icon(
-                                onPressed: () {
-                                  setState(() {
-                                    _isEditingCrop = false;
-                                    _tempTransform = null;
-                                  });
-                                },
-                                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-                                icon: const Icon(Icons.close),
-                                label: const Text("Cancel"),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const Padding(
-                           padding: EdgeInsets.only(top: 8.0),
-                           child: Text("Drag yellow corners to crop. Drag box to move crop.\nResize/Roate video with blue/green handles.", 
-                               style: TextStyle(color: Colors.white70, fontSize: 12)),
-                        )
-                    ] else ...[
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton(
-                            onPressed: () {
-                              setState(() {
-                                _isEditingCrop = true;
-                                final t = show.mediaTransform ?? MediaTransform(
-                                  scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0
-                                );
-                                _tempTransform = (t.crop == null) 
-                                   ? MediaTransform(
-                                      scaleX: t.scaleX, scaleY: t.scaleY, 
-                                      translateX: t.translateX, translateY: t.translateY, 
-                                      rotation: t.rotation,
-                                      crop: CropInfo(x: 10, y: 10, width: 80, height: 80)
-                                     )
-                                   : t;
-                              });
-                            },
-                            child: const Text("Edit Video"),
+                            ],
                           ),
                         ),
-                        
-                        if (transform.crop != null || transform.scaleX != 1 || transform.scaleY != 1 || transform.rotation != 0) ...[
-                           const SizedBox(height: 10),
-                           SizedBox(
-                               width: double.infinity,
-                               child: TextButton.icon(
-                                 onPressed: () {
-                                    showState.updateTransform(MediaTransform(
-                                       scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0, crop: null
-                                    ));
-                                 },
-                                 icon: const Icon(Icons.restart_alt, color: Colors.grey),
-                                 label: const Text("Reset All", style: TextStyle(color: Colors.grey)),
-                               ),
-                           )
-                        ]
-                    ]
-                  ] else
-                     const Text("No content loaded.", style: TextStyle(color: Colors.white54)),
+                      ),
+                   ] else ...[
+                       Text("EFFECTS LIBRARY", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                       const SizedBox(height: 12),
+                       Expanded(
+                         child: ListView(
+                           children: EffectType.values.map((e) {
+                              return Container(
+                                margin: const EdgeInsets.only(bottom: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.05),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: ListTile(
+                                  leading: Icon(Icons.auto_fix_high, color: Colors.white70),
+                                  title: Text(e.name.toUpperCase(), style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                                  onTap: () {
+                                    setState(() {
+                                      _selectedEffect = e;
+                                      _loadEffectDefaults(e);
+                                    });
+                                  },
+                                ),
+                              );
+                           }).toList(),
+                         ),
+                       ),
+                   ],
 
-                ],
+                  ],
               ),
             ),
-          ),
           ],
         );
       },
     );
+  }
+
+  // MARK: - UI Helpers
+
+  void _loadEffectDefaults(EffectType type) {
+     try {
+       final def = EffectService.effects.firstWhere((e) => e.type == type);
+       setState(() {
+          _effectParams = Map.from(def.defaultParams);
+          _isPlaying = true;
+          // if (player.state.playing) player.pause(); // Optional: pause video to focus on effect?
+       });
+     } catch (e) {
+       debugPrint("Error loading defaults for $type: $e");
+     }
+  }
+
+  Widget _buildModernButton({required IconData icon, required String label, required Color color, required VoidCallback? onTap, bool isEnabled = true}) {
+      return Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: isEnabled ? onTap : null,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: isEnabled ? LinearGradient(colors: [color.withOpacity(0.8), color.withOpacity(0.5)], begin: Alignment.topLeft, end: Alignment.bottomRight) 
+                                :  const LinearGradient(colors: [Colors.white10, Colors.white10]),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: isEnabled ? color.withOpacity(0.6) : Colors.white10),
+              boxShadow: isEnabled ? [BoxShadow(color: color.withOpacity(0.3), blurRadius: 8, offset: const Offset(0, 4))] : [],
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, color: isEnabled ? Colors.white : Colors.white38, size: 28),
+                const SizedBox(height: 8),
+                Text(label, style: TextStyle(color: isEnabled ? Colors.white : Colors.white38, fontSize: 12, fontWeight: FontWeight.bold)),
+              ],
+            ),
+          ),
+        ),
+      );
+  }
+
+  Widget _buildToggle(IconData icon, String label, bool isActive, VoidCallback onTap) {
+      return Expanded(
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+             padding: const EdgeInsets.symmetric(vertical: 12),
+             decoration: BoxDecoration(
+               color: isActive ? Colors.white : Colors.white10,
+               borderRadius: BorderRadius.circular(8),
+             ),
+             child: Column(
+               children: [
+                 Icon(icon, color: isActive ? Colors.black : Colors.white70, size: 20),
+                 const SizedBox(height: 4),
+                 Text(label, style: TextStyle(color: isActive ? Colors.black : Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
+               ],
+             ),
+          ),
+        ),
+      );
   }
 }
 
