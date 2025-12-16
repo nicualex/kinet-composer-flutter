@@ -234,8 +234,8 @@ class _VideoTabState extends State<VideoTab> {
 
      try {
         final filter = EffectService.getFFmpegFilter(_selectedEffect!, _effectParams);
-        // Corrected path - removed duplicate folder
-        const String ffmpegPath = r'C:\Users\nicua\Documents\Development\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe';
+        // Use system ffmpeg
+        const String ffmpegPath = 'ffmpeg';
         
         // Parse source to separate -i and -vf for robustness
         String source = "color=c=black:s=1920x1080";
@@ -353,7 +353,7 @@ class _VideoTabState extends State<VideoTab> {
             SizedBox(height: 20),
             Text("Exporting Video..."),
             SizedBox(height: 10),
-            Text("This process creates a new video file with your transformations applied. It may take several minutes depending on the video length and resolution.", 
+            Text("This process creates a new video file matched to your matrix resolution.\n\nIt performs High-Quality Lanczos Downscaling and Motion Compensation Interpolation (MCI).\n\nWARNING: This process is computationally intensive and may take significantly longer than a standard export.", 
                 textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: Colors.grey)),
           ],
         ),
@@ -394,8 +394,152 @@ class _VideoTabState extends State<VideoTab> {
 
       String filterString = filters.join(',');
       
-      // Corrected path - removed duplicate folder
-      const String ffmpegPath = r'C:\Users\nicua\Documents\Development\ffmpeg-master-latest-win64-gpl-shared\bin\ffmpeg.exe';
+      // NEW: INTERSECTION LOGIC
+      // We calculate the intersection of the Matrix and the Video in "Visual World Space"
+      // to determine exactly what part of the video covers the matrix, and what the resolution should be.
+      
+      const double gridSize = 10.0;
+      
+      // 1. Calculate Matrix Bounds (Centered at 0,0 for simplicity of alignment checks?)
+      // Actually, let's assume Matrix Center is (0,0) and Video is transformed relative to it.
+      // We need absolute bounds.
+      
+      double minMx = double.infinity, maxMx = double.negativeInfinity;
+      double minMy = double.infinity, maxMy = double.negativeInfinity;
+      
+      bool hasMatrix = false;
+      if (show.fixtures.isNotEmpty) {
+         hasMatrix = true;
+         for (var f in show.fixtures) {
+            for (var p in f.pixels) {
+               double px = p.x * gridSize;
+               double py = p.y * gridSize;
+               if (px < minMx) minMx = px;
+               if (px > maxMx) maxMx = px;
+               if (py < minMy) minMy = py;
+               if (py > maxMy) maxMy = py;
+            }
+         }
+         // Add grid size to max to cover the pixel width
+         maxMx += gridSize;
+         maxMy += gridSize;
+      }
+      
+      // 2. Adjust Matrix to be Centered at 0,0 locally?
+      // In logical space, the matrix starts at minMx, minMy.
+      // But visually we center everything?
+      // Actually, let's assume the alignment in logic mirrors UI:
+      // Global Center = (minMx + maxMx)/2.
+      // We can work in "Offset from Matrix Center" space.
+      
+      List<String> hqFilters = [];
+      String? cropFilter;
+      
+      double matW = 0;
+      double matH = 0;
+
+      if (hasMatrix) {
+          matW = maxMx - minMx;
+          matH = maxMy - minMy;
+          double matCX = (minMx + maxMx) / 2;
+          double matCY = (minMy + maxMy) / 2;
+          
+          // Matrix Rect relative to Center: [-w/2, w/2]
+          Rect matrixRect = Rect.fromCenter(center: Offset.zero, width: matW, height: matH);
+          
+          // Video Rect relative to Center
+          // Video is w*s, h*s. Center at tx, ty.
+          // Note: t.translateX is delta from default center.
+          final safeW = width ?? 1920; 
+          final safeH = height ?? 1080;
+          
+          double vidW = safeW * t.scaleX;
+          double vidH = safeH * t.scaleY;
+          Rect videoRect = Rect.fromCenter(
+             center: Offset(t.translateX, t.translateY), 
+             width: vidW, 
+             height: vidH
+          );
+          
+          // 3. Intersect
+          Rect intersect = matrixRect.intersect(videoRect);
+          
+          if (intersect.width > 0 && intersect.height > 0) {
+             // 4. Calculate Output Resolution (1 px per grid unit)
+             int targetW = (intersect.width / gridSize).round();
+             int targetH = (intersect.height / gridSize).round();
+             if (targetW < 1) targetW = 1;
+             if (targetH < 1) targetH = 1;
+             if (targetW % 2 != 0) targetW++;
+             if (targetH % 2 != 0) targetH++;
+             
+             // 5. Calculate Source Crop
+             // Map Intersection relative to VideoRect origin
+             double cropVisX = intersect.left - videoRect.left;
+             double cropVisY = intersect.top - videoRect.top;
+             
+             // Ensure cropVis is not negative (floating point noise)
+             if (cropVisX < 0) cropVisX = 0;
+             if (cropVisY < 0) cropVisY = 0;
+
+             // Calculate Crop Dimensions in Visual Units (== Scaled Video Pixels)
+             int finalCropX = (cropVisX).floor();
+             int finalCropY = (cropVisY).floor();
+             int finalCropW = (intersect.width).floor();
+             int finalCropH = (intersect.height).floor();
+             
+             // IMPORTANT: We need to ensure X+W and Y+H do not exceed the actual input video size.
+             // The input video at this stage is the output of Block B.
+             // Block B size logic: trunc(iw*S/2)*2.
+             
+             // Calculate what Block B produced:
+             int scaledVidW = (safeW * t.scaleX / 2).truncate() * 2;
+             int scaledVidH = (safeH * t.scaleY / 2).truncate() * 2;
+             
+             // Clamp Crop Width/Height
+             if (finalCropX + finalCropW > scaledVidW) {
+                finalCropW = scaledVidW - finalCropX;
+             }
+             if (finalCropY + finalCropH > scaledVidH) {
+                finalCropH = scaledVidH - finalCropY;
+             }
+             
+             // Final check for valid crop
+             if (finalCropW > 0 && finalCropH > 0) {
+                 cropFilter = "crop=$finalCropW:$finalCropH:$finalCropX:$finalCropY";
+                 
+                 debugPrint("Export Debug: Matrix Rect: $matrixRect");
+                 debugPrint("Export Debug: Video Rect: $videoRect");
+                 debugPrint("Export Debug: Intersect: $intersect");
+                 debugPrint("Export Debug: Scaled Video Size: $scaledVidW x $scaledVidH");
+                 debugPrint("Export Debug: Crop: $cropFilter");
+
+                 // Then Scale to target (10x reduction)
+                 hqFilters.add(cropFilter!);
+                 hqFilters.add('scale=$targetW:$targetH:flags=lanczos');
+                 hqFilters.add("minterpolate='mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1'");
+             } else {
+                 debugPrint("Export Warning: Invalid Crop Dimensions after clamp. W:$finalCropW H:$finalCropH");
+             }
+          }
+      } 
+      
+      // Fallback if no matrix or no intersect (e.g. panned away)
+      if (hqFilters.isEmpty) {
+         // Just default to previous logic or 100x100 placeholder?
+         // Let's just output the scaled video?
+         // User expects consistency.
+         // If no matrix, we can't match it.
+      } else {
+         if (filterString.isNotEmpty) {
+            filterString += ",${hqFilters.join(',')}";
+         } else {
+            filterString = hqFilters.join(',');
+         }
+      }
+      
+      // Use system ffmpeg
+      const String ffmpegPath = 'ffmpeg';
 
       List<String> args = [
         '-i', show.mediaFile,
@@ -441,6 +585,75 @@ class _VideoTabState extends State<VideoTab> {
     }
   }
 
+  void _fitToMatrix() {
+    final show = context.read<ShowState>().currentShow;
+    if (show == null || show.fixtures.isEmpty) return;
+
+    final width = player.state.width;
+    final height = player.state.height;
+    if (width == null || height == null) return;
+    
+    // 1. Calculate Matrix Bounds in "Pixel" space (10.0 scale)
+    double minMx = double.infinity, maxMx = double.negativeInfinity;
+    double minMy = double.infinity, maxMy = double.negativeInfinity;
+    const double gridSize = 10.0;
+    
+    for (var f in show.fixtures) {
+       for (var p in f.pixels) {
+           double px = p.x * gridSize;
+           double py = p.y * gridSize;
+           if (px < minMx) minMx = px;
+           if (px > maxMx) maxMx = px;
+           if (py < minMy) minMy = py;
+           if (py > maxMy) maxMy = py;
+       }
+    }
+    maxMx += gridSize; // full width
+    maxMy += gridSize; // full height
+    
+    double matW = maxMx - minMx;
+    double matH = maxMy - minMy;
+    
+    // 2. Calculate Required Scale
+    // Video Size Visual = VideoPx * Scale
+    
+    double targetScaleX = 1.0;
+    double targetScaleY = 1.0;
+    
+    if (!_lockAspectRatio) {
+       // STRETCH: Visual Size == Matrix Size
+       targetScaleX = matW / width;
+       targetScaleY = matH / height;
+    } else {
+       // CONTAIN: Fit inside Matrix
+       // Min(MatrixW / VideoW, MatrixH / VideoH)
+       double rX = matW / width;
+       double rY = matH / height;
+       double scale = (rX < rY) ? rX : rY;
+       targetScaleX = scale;
+       targetScaleY = scale;
+    }
+    
+    // 3. Center Alignment
+    // Reset translation to 0,0 aligns video center to matrix center (in our specific stack layout)
+    
+    setState(() {
+       _isEditingCrop = false;
+       context.read<ShowState>().updateTransform(MediaTransform(
+          scaleX: targetScaleX,
+          scaleY: targetScaleY,
+          translateX: 0,
+          translateY: 0,
+          rotation: 0,
+          crop: null, // Reset crop
+       ));
+    });
+    
+    debugPrint("Auto-Fit Applied");
+    
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Auto-Fit Applied"), duration: Duration(milliseconds: 500)));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer<ShowState>(
@@ -474,90 +687,134 @@ class _VideoTabState extends State<VideoTab> {
                     child: Stack(
                     alignment: Alignment.center,
                     children: [
-                      // GRID BACKGROUND
-                      if (show.fixtures.isNotEmpty)
-                        LayoutBuilder(
-                          builder: (context, constraints) {
-                             // Determine total grid size
-                             double maxWidth = 0;
-                             double maxHeight = 0;
-                             const double pxSize = 10.0;
+                      // UNIFIED LAYOUT
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                           // 1. Calculate Matrix Bounds (Logical 10.0 scale)
+                           double minX = double.infinity, maxX = double.negativeInfinity;
+                           double minY = double.infinity, maxY = double.negativeInfinity;
+                           const double gridSize = 10.0;
+                           bool hasFixtures = show.fixtures.isNotEmpty;
+                           
+                           if (hasFixtures) {
                              for (var f in show.fixtures) {
-                               maxWidth = (f.width * pxSize > maxWidth) ? f.width * pxSize : maxWidth;
-                               maxHeight = (f.height * pxSize > maxHeight) ? f.height * pxSize : maxHeight;
+                               for (var p in f.pixels) {
+                                   double px = p.x * gridSize;
+                                   double py = p.y * gridSize;
+                                   if (px < minX) minX = px;
+                                   if (px > maxX) maxX = px;
+                                   if (py < minY) minY = py;
+                                   if (py > maxY) maxY = py;
+                               }
                              }
-                             
-                             if (maxWidth == 0 || maxHeight == 0) return const SizedBox.shrink();
+                             // Add grid block size
+                             maxX += gridSize; 
+                             maxY += gridSize;
+                           } else {
+                             // Default Space if no matrix
+                             minX = 0; maxX = 1000;
+                             minY = 0; maxY = 1000;
+                           }
+                           
+                           double matW = maxX - minX;
+                           double matH = maxY - minY;
+                           
+                           if (matW <= 0) matW = 1000;
+                           if (matH <= 0) matH = 1000;
 
-                             return Opacity(
-                               opacity: 0.8, // More visible background
-                               child: Center(
-                                 child: FittedBox(
-                                   fit: BoxFit.contain,
-                                   child: SizedBox(
-                                     width: maxWidth,
-                                     height: maxHeight,
-                                     child: CustomPaint(
-                                       painter: PixelGridPainter(
-                                          fixtures: show.fixtures, 
-                                          drawLabels: false,
-                                          gridSize: pxSize
-                                       ),
-                                     ),
-                                   ),
-                                 ),
-                               ),
-                             );
-                          },
-                        ),
-                      
-                      // We show Gizmo if media present OR we are previewing an effect
-                      if (show.mediaFile.isNotEmpty || _selectedEffect != null)
-                        TransformGizmo(
-                          transform: transform,
-                          isCropMode: _isEditingCrop,
-                          editMode: _editMode,
-                          lockAspect: _lockAspectRatio,
-                          onUpdate: (newTransform) {
-                               showState.updateTransform(newTransform);
-                          },
-                          // CHILD SELECT
-                          child: (_selectedEffect != null) 
-                              ? AspectRatio(
-                                  aspectRatio: 16 / 9,
-                                  child: EffectRenderer(
-                                      type: _selectedEffect, 
-                                      params: _effectParams,
-                                      isPlaying: _isPlaying
-                                  )
-                                )
-                              : (transform.crop != null && !_isEditingCrop)
-                                  ? ClipRect(
-                                      clipper: PercentageClipper(transform.crop!),
-                                      child: AspectRatio(
-                                        aspectRatio: 16 / 9,
-                                        child: Video(controller: controller),
+                           return FittedBox(
+                             fit: BoxFit.contain,
+                             child: Container(
+                               width: matW,
+                               height: matH,
+                               color: Colors.transparent, // "World" Canvas
+                               child: Stack(
+                                 clipBehavior: Clip.none,
+                                 alignment: Alignment.center,
+                                 children: [
+                                    // LAYER 1: Matrix (Localized)
+                                    // Translate so (minX, minY) is at (0,0) of this container
+                                    if (hasFixtures)
+                                      Positioned(
+                                        left: -minX, 
+                                        top: -minY,
+                                        child: CustomPaint(
+                                          painter: PixelGridPainter(
+                                             fixtures: show.fixtures, 
+                                             drawLabels: false,
+                                             gridSize: gridSize
+                                          ),
+                                        ),
                                       ),
-                                    )
-                                  : AspectRatio(
-                                      aspectRatio: 16 / 9,
-                                      child: Video(controller: controller),
-                                    ),
-                        )
-                      else
-                        const Center(
-                          child: Text(
-                            "No video loaded.\nUse 'Load Video' on the right panel.",
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.white54),
-                          ),
-                        ),
+                                    
+                                    // LAYER 2: Video (Gizmo)
+                                    // We need to place the Video Logic Center at the Canvas Logic Center.
+                                    // Canvas Center = (matW/2, matH/2).
+                                    // Gizmo is centered by 'Alignment.center' of Stack?
+                                    // Stack size is matW, matH. 
+                                    // Alignment.center puts child center at (matW/2, matH/2).
+                                    // So this aligns perfectly!
+                                    
+                                    if (show.mediaFile.isNotEmpty || _selectedEffect != null)
+                                      Center(
+                                        child: OverflowBox(
+                                           minWidth: (player.state.width ?? 1920).toDouble(),
+                                           maxWidth: (player.state.width ?? 1920).toDouble(),
+                                           minHeight: (player.state.height ?? 1080).toDouble(),
+                                           maxHeight: (player.state.height ?? 1080).toDouble(),
+                                           alignment: Alignment.center,
+                                           child: TransformGizmo(
+                                              transform: transform,
+                                              isCropMode: _isEditingCrop,
+                                              editMode: _editMode,
+                                              lockAspect: _lockAspectRatio,
+                                              onDoubleTap: _fitToMatrix,
+                                              onUpdate: (newTransform) {
+                                                   showState.updateTransform(newTransform);
+                                              },
+                                              child: Container(
+                                                width: (player.state.width ?? 1920).toDouble(),
+                                                height: (player.state.height ?? 1080).toDouble(),
+                                                child: (_selectedEffect != null) 
+                                                  ? AspectRatio(
+                                                      aspectRatio: 16 / 9,
+                                                      child: EffectRenderer(
+                                                          type: _selectedEffect, 
+                                                          params: _effectParams,
+                                                          isPlaying: _isPlaying
+                                                      )
+                                                    )
+                                                  : (transform.crop != null && !_isEditingCrop)
+                                                      ? ClipRect(
+                                                          clipper: PercentageClipper(transform.crop!),
+                                                          child: Video(controller: controller, fit: BoxFit.fill),
+                                                        )
+                                                      : Video(controller: controller, fit: BoxFit.fill),
+                                              ),
+                                            ),
+                                        ),
+                                      )
+                                     else
+                                      const Center(
+                                        child: Text(
+                                          "No video loaded.\nUse 'Load Video' on the right panel.",
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(color: Colors.white54, fontSize: 40), // Large text for large world
+                                        ),
+                                      ),
+                                 ],
+                               ),
+                             ),
+                           );
+                        },
+                      ),
                     ],
                   ),
                 ),
               ),
             ),
           ),
+
 
             // NEW: Modern Sidebar
             Container(
@@ -601,21 +858,14 @@ class _VideoTabState extends State<VideoTab> {
                           onTap: () => (_selectedEffect != null) ? _exportEffect() : _exportVideo()
                         ),
                         // Full width transfer button? Or just another tile.
-                        _buildModernButton(
-                          icon: Icons.upload_file, 
-                          label: "Transfer", 
-                          color: const Color(0xFFCE93D8), // Pastel Purple
-                          isEnabled: show.mediaFile.isNotEmpty,
-                          onTap: _showTransferDialog
-                        ),
+
                      ],
                    ),
                    const SizedBox(height: 32),
 
                    // 2.5 Playback Controls
                    if (show.mediaFile.isNotEmpty) ...[
-                      Text("PLAYBACK", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 12),
+
                       Row(
                         children: [
                            Expanded(
@@ -650,8 +900,7 @@ class _VideoTabState extends State<VideoTab> {
 
                    // 3. Edit Modes
                    if (show.mediaFile.isNotEmpty) ...[
-                      Text("EDIT TOOLS", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 12),
+
                       Row(
                         children: [
                           _buildToggle(Icons.zoom_in, "Zoom/Pan", _isEditingCrop && _editMode == EditMode.zoom, () {

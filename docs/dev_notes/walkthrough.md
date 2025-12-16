@@ -28,3 +28,13 @@ I have implemented the video editing functionality in the `VideoTab`. You can no
     - **Rotate**: Drag the "Rotation" slider. The video should rotate around its center.
     - **Position**: Drag "Position X/Y" sliders. The video should move within the black container.
 5.  **Persist**: Switch to another tab (e.g., "Setup") and back to "Video". The video should still be there with your transform settings applied.
+
+### Double-Click Auto Fit
+- [ ] Load a video and ensure a fixture/matrix is present.
+- [ ] Enable "Lock Aspect Ratio".
+- [ ] Double-click the video (Zoom Mode).
+- [ ] **Verify**: The video scales to fit *inside* the matrix bounds (black bars on sides/top if mismatch).
+- [ ] Disable "Lock Aspect Ratio".
+- [ ] Double-click the video.
+- [ ] **Verify**: The video stretches to fill the matrix bounds exactly.
+- [ ] **Verify**: No yellow overflow warnings appear. video aligns with green matrix preview.

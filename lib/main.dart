@@ -24,11 +24,27 @@ class KinetComposerApp extends StatelessWidget {
       child: MaterialApp(
         title: 'Kinet Composer',
         theme: ThemeData(
+          useMaterial3: true,
+          scaffoldBackgroundColor: Colors.transparent,
           colorScheme: ColorScheme.fromSeed(
             seedColor: const Color(0xFF6200EE),
             brightness: Brightness.dark,
+            secondary: Colors.cyanAccent,
+            surface: const Color(0x0DFFFFFF), // Very transparent white
+            background: Colors.transparent,
           ),
-          useMaterial3: true,
+          appBarTheme: const AppBarTheme(
+             backgroundColor: Colors.transparent,
+             elevation: 0,
+          ),
+          // cardTheme: CardTheme(
+          //   color: Colors.white.withOpacity(0.05), // Glassy card
+          //   elevation: 0,
+          //   shape: RoundedRectangleBorder(
+          //      borderRadius: BorderRadius.circular(16),
+          //      side: BorderSide(color: Colors.white.withOpacity(0.1))
+          //   )
+          // ),
         ),
         home: const HomeScreen(),
       ),

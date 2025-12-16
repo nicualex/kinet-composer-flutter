@@ -32,10 +32,23 @@
 - [ ] Upgrade FileUploader to handle Bundle upload
 - [ ] Create Transfer UI (Card form with Thumbnail & Player list)
 - [x] Create Transfer UI (Card form with Thumbnail & Player list)
-- [ ] Verify Saving and Transfer flow
+- [x] Verify Saving and Transfer flow
+- [x] Fix reported dimensions 0x0 (Android App Update) <!-- id: 16 -->
+- [x] Remove Transfer button and Section Headers in Video Tab <!-- id: 17 -->
 
 ## Validation & Persistence
 - [x] Verify `ShowManifest` includes fixtures and transform data <!-- id: 12 -->
 - [x] Implement UI Validation (Disable Save/Transfer if no video) <!-- id: 13 -->
 - [x] Allow selecting discovered player to import Matrix Characteristics <!-- id: 15 -->
 - [x] Ensure `ShowState` captures matrix configuration in `fixtures` <!-- id: 14 -->
+
+## UI Polish & Stability
+- [x] Remove App Title and apply Dark Glass Theme <!-- id: 18 -->
+- [x] Fix ProjectTab stream crash <!-- id: 19 -->
+- [x] Fix Video Export (FFmpeg Path) <!-- id: 20 -->
+
+## Export Enhancements
+- [x] Implement Downscaling to Matrix Resolution with Motion Interpolation <!-- id: 21 -->
+
+## Interaction Improvements
+- [x] Double-Check Clip Auto Fit (onDoubleTap in TransformGizmo) <!-- id: 22 -->

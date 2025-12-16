@@ -10,24 +10,45 @@ class HomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return DefaultTabController(
       length: 3,
-      child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Kinet Composer'),
-          bottom: const TabBar(
-            tabs: [
-              Tab(icon: Icon(Icons.slideshow), text: 'Shows'), // Renamed from Project
-              Tab(icon: Icon(Icons.grid_on), text: 'Setup'),
-              Tab(icon: Icon(Icons.movie_creation), text: 'Videos / Effects'),
+      child: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0xFF1A1A2E), // Deep Dark Blue/Purple
+              Color(0xFF16213E), // Dark Blue
+              Color(0xFF0F3460), // Lighter Navy
             ],
           ),
         ),
-        body: TabBarView(
-          physics: const NeverScrollableScrollPhysics(),
-          children: const [
-            ProjectTab(),
-            SetupTab(),
-            VideoTab(),
-          ],
+        child: Scaffold(
+          backgroundColor: Colors.transparent, // Let gradient show through
+          appBar: AppBar(
+             backgroundColor: Colors.transparent,
+             elevation: 0,
+             toolbarHeight: 0, // Effectively hides the title area
+             bottom: const TabBar(
+              dividerColor: Colors.transparent,
+              indicatorSize: TabBarIndicatorSize.label,
+              indicatorColor: Colors.cyanAccent,
+              labelColor: Colors.cyanAccent,
+              unselectedLabelColor: Colors.white54,
+              tabs: [
+                Tab(icon: Icon(Icons.slideshow), text: 'Shows'),
+                Tab(icon: Icon(Icons.grid_on), text: 'Setup'),
+                Tab(icon: Icon(Icons.movie_creation), text: 'Videos / Effects'),
+              ],
+            ),
+          ),
+          body: const TabBarView(
+            physics: NeverScrollableScrollPhysics(),
+            children: [
+              ProjectTab(),
+              SetupTab(),
+              VideoTab(),
+            ],
+          ),
         ),
       ),
     );

@@ -12,6 +12,7 @@ class TransformGizmo extends StatefulWidget {
   final bool lockAspect;
   final EditMode editMode; // NEW
   final Function(MediaTransform) onUpdate;
+  final VoidCallback? onDoubleTap; // NEW
   final Widget child;
 
   const TransformGizmo({
@@ -19,6 +20,7 @@ class TransformGizmo extends StatefulWidget {
     required this.transform,
     required this.onUpdate,
     required this.child,
+    this.onDoubleTap,
     this.isCropMode = false,
     this.lockAspect = true,
     this.editMode = EditMode.zoom, // Default
@@ -40,6 +42,22 @@ class _TransformGizmoState extends State<TransformGizmo> {
   void _onPanStart(DragStartDetails details) {
     _dragStart = details.globalPosition;
     _initialTransform = widget.transform; 
+  }
+
+  // Helper to determine the ACTUAL screen scale ratio (Screen px per Local px)
+  // This accounts for FittedBox, Transform, DevicePixelRatio, etc.
+  double _getGlobalScaleFactor() {
+      final RenderBox? box = context.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) return 1.0;
+      
+      // Measure 100 local pixels in global space
+      final p1 = box.localToGlobal(Offset.zero);
+      final p2 = box.localToGlobal(const Offset(100, 0));
+      final dist = (p2 - p1).distance;
+      
+      // GlobalScale = GlobalDist / LocalDist
+      if (dist == 0) return 1.0;
+      return dist / 100.0;
   }
 
   void _onTranslateUpdate(DragUpdateDetails details) {
@@ -149,8 +167,55 @@ class _TransformGizmoState extends State<TransformGizmo> {
       double dx_local = globalDelta.dx * cos(rotRad) - globalDelta.dy * sin(rotRad);
       double dy_local = globalDelta.dx * sin(rotRad) + globalDelta.dy * cos(rotRad);
 
-      double dScaleX = dx_local / intrinsicSize.width;
-      double dScaleY = dy_local / intrinsicSize.height;
+      // PROPORTIONALITY FIX (VERSION 3 - ROBUST GLOBAL SCALE):
+      // 1. Get Global Scale Factor (Screen Pixels per Logic Pixel)
+      double globalScale = _getGlobalScaleFactor();
+      if (globalScale == 0) globalScale = 1.0;
+      
+      // 2. Convert Screen Delta -> Logic Delta
+      // ScreenDelta / GlobalScale = LogicDelta
+      double dx_logic = dx_local / globalScale;
+      double dy_logic = dy_local / globalScale;
+      
+      // 3. Convert Logic Delta -> Scale Delta
+      // LogicDelta / IntrinsicSize = ScaleDelta
+      // (Since IntrinsicSize is the "100%" basis for scale)
+
+      double currentSX = _initialTransform!.scaleX;
+      double currentSY = _initialTransform!.scaleY;
+      if (currentSX == 0) currentSX = 1;
+      if (currentSY == 0) currentSY = 1;
+      
+      Size visualSize = intrinsicSize;
+
+      double dScaleX = (dx_logic * currentSX.abs()) / visualSize.width; // Logic vs Logic
+      double dScaleY = (dy_logic * currentSY.abs()) / visualSize.height;
+      
+      // Wait, if visualSize.width is ALREADY scaled by scaleX in logic space?
+      // No, visualSize comes from RenderBox.size.
+      // If we are observing RenderBox of Child inside Transform...
+      // RenderBox sizes are generally unscaled by the Transform above them?
+      // Yes. So visualSize.width IS intrinsicSize.width (1920).
+      
+      // So dScaleX = dx_logic / visualSize.width.
+      // Wait, if I drag 100 logic pixels on a 1000px wide object, I want 10% change.
+      // So dScaleX = 0.1.
+      // So dScaleX = dx_logic / visualSize.width.
+      // Is that correct?
+      // Original Scale = 1.0. New Scale = 1.1.
+      // Visual Width goes 1000 -> 1100. Diff = 100. Correct.
+      
+      // What if Scale is 2.0?
+      // Visual Width is 2000.
+      // I drag 100 logic pixels.
+      // I expect visual width to go 2000 -> 2100.
+      // That is a 5% increase relative to 2000.
+      // But scale goes 2.0 -> 2.1?
+      // 2.1 * 1000 = 2100.
+      // So dScale IS always dx_logic / intrinsicWidth.
+      
+      dScaleX = dx_logic / visualSize.width;
+      dScaleY = dy_logic / visualSize.height;
       
       double newScaleX = _initialTransform!.scaleX;
       double newScaleY = _initialTransform!.scaleY;
@@ -296,8 +361,9 @@ class _TransformGizmoState extends State<TransformGizmo> {
     // Dynamic Padding
     final double sX = t.scaleX.abs();
     final double sY = t.scaleY.abs();
-    final double padX = 50.0 / (sX < 0.1 ? 0.1 : sX); 
-    final double padY = 50.0 / (sY < 0.1 ? 0.1 : sY);
+    // FORCE NO PADDING TO PREVENT VIDEO SHRINKING
+    final double padX = 0; 
+    final double padY = 0;
     
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -312,37 +378,33 @@ class _TransformGizmoState extends State<TransformGizmo> {
                   ..rotateZ(t.rotation * pi / 180)
                   ..scale(t.scaleX, t.scaleY),
                 alignment: Alignment.center,
-                child: IntrinsicWidth(
-                  child: IntrinsicHeight(
-                    child: Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                         // LAYER 1: Video Content (Background)
-                         Padding(
-                           padding: EdgeInsets.symmetric(horizontal: padX, vertical: padY),
-                           child: KeyedSubtree(
-                             key: _contentKey,
-                             child: widget.child,
-                           ),
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                       // LAYER 1: Video Content (Background)
+                       Padding(
+                         padding: EdgeInsets.symmetric(horizontal: padX, vertical: padY),
+                         child: KeyedSubtree(
+                           key: _contentKey,
+                           child: widget.child,
                          ),
-                         
-                         // LAYER 2: Pan Handler (Covers video + padding)
-                         // Captures drag events for Pan, blocking video controls if they conflict
-                         _buildPanHandler(),
-                         
-                         // LAYER 3: Crop UI (If active)
-                         // Padding applied inside _buildCropUI via Positioned offsets to avoid ParentDataWidget error
-                         if(widget.isCropMode && widget.editMode == EditMode.crop && t.crop != null) 
-                            _buildCropUI(t.crop!, t, padX, padY),
+                       ),
+                       
+                       // LAYER 2: Pan Handler (Covers video + padding)
+                       // Captures drag events for Pan, blocking video controls if they conflict
+                       _buildPanHandler(),
+                       
+                       // LAYER 3: Crop UI (If active)
+                       // Padding applied inside _buildCropUI via Positioned offsets to avoid ParentDataWidget error
+                       if(widget.isCropMode && widget.editMode == EditMode.crop && t.crop != null) 
+                          _buildCropUI(t.crop!, t, padX, padY),
 
-                         // LAYER 4: Standard UI (Zoom handles)
-                         // Positioned with explicit offsets, sits on top
-                         if(widget.isCropMode && widget.editMode == EditMode.zoom)
-                            ..._buildStandardUI(t, padX, padY),
-                      ],
-                    ),
+                       // LAYER 4: Standard UI (Zoom handles)
+                       // Positioned with explicit offsets, sits on top
+                       if(widget.isCropMode && widget.editMode == EditMode.zoom)
+                          ..._buildStandardUI(t, padX, padY),
+                    ],
                   ),
-                )
             ),
           ],
         );
@@ -416,75 +478,118 @@ class _TransformGizmoState extends State<TransformGizmo> {
            behavior: HitTestBehavior.translucent, // Catches taps on empty space
            onPanStart: _onPanStart,
            onPanUpdate: _onTranslateUpdate,
+           onDoubleTap: widget.onDoubleTap,
            child: Container(color: Colors.transparent), 
          )
       );
   }
   
   List<Widget> _buildStandardUI(MediaTransform t, double padX, double padY) {
-      // VISUAL SAFEGUARD: Avoid division by zero or extremely small scales for UI elements
-      double safeSX = t.scaleX.abs();
-      if (safeSX < 0.01) safeSX = 0.01;
-      double safeSY = t.scaleY.abs();
-      if (safeSY < 0.01) safeSY = 0.01;
+       // Global Scale for constant visual size
+       double globalScale = _getGlobalScaleFactor();
+       if (globalScale == 0) globalScale = 1.0;
 
-      return [
-          // Border (around Video)
-          // Needs offset because it's in the Padded Stack
-         Positioned(
-           left: padX, top: padY, right: padX, bottom: padY,
-           child: IgnorePointer(
-             child: Container(
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.blueAccent, width: 2.0 / safeSX),
-                ),
-             ),
-           ),
-         ),
-         // Handles
-         _buildHandle(Alignment.topLeft, t.scaleX, padX, padY),
-         _buildHandle(Alignment.topRight, t.scaleX, padX, padY),
-         _buildHandle(Alignment.bottomLeft, t.scaleX, padX, padY),
-         _buildHandle(Alignment.bottomRight, t.scaleX, padX, padY),
-         
-          // Rotate
+       return [
+           // Border (around Video)
+           // Needs offset because it's in the Padded Stack
           Positioned(
-            top: padY - (40 / safeSY), // Align top-center relative to video top
-            left: 0,
-            right: 0,
-            child: Center(
-              child: GestureDetector(
-                onPanStart: (d) => _onPanStart(d),
-                onPanUpdate: (d) => _onRotateUpdate(d, Size.zero),
-                behavior: HitTestBehavior.opaque,
-                child: Container(
-                  width: 48 / safeSX, 
-                  height: 48 / safeSY,
-                  color: Colors.transparent, // Hit area
-                  alignment: Alignment.center,
-                  child: Container(
-                    width: 20 / safeSX, 
-                    height: 20 / safeSY,
-                    decoration: const BoxDecoration(
-                      color: Colors.green,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
+            left: padX, top: padY, right: padX, bottom: padY,
+            child: IgnorePointer(
+              child: Container(
+                 decoration: BoxDecoration(
+                   // Compensation for Non-Uniform Scale
+                   border: Border(
+                      top: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale) / t.scaleY.abs()),
+                      bottom: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale) / t.scaleY.abs()),
+                      left: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale) / t.scaleX.abs()),
+                      right: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale) / t.scaleX.abs()),
+                   ),
+                 ),
               ),
             ),
-          )
-       ];
+          ),
+          // Handles
+          _buildHandle(Alignment.topLeft, t.scaleX, padX, padY),
+          _buildHandle(Alignment.topRight, t.scaleX, padX, padY),
+          _buildHandle(Alignment.bottomLeft, t.scaleX, padX, padY),
+          _buildHandle(Alignment.bottomRight, t.scaleX, padX, padY),
+          
+           // Rotate
+           Positioned(
+             top: padY - (40 / globalScale) / t.scaleY.abs(), 
+             left: 0,
+             right: 0,
+             child: Center(
+               child: GestureDetector(
+                 onPanStart: (d) => _onPanStart(d),
+                 onPanUpdate: (d) => _onRotateUpdate(d, Size.zero),
+                 behavior: HitTestBehavior.opaque,
+                 child: Container(
+                   width: (48 / globalScale) / t.scaleX.abs(), 
+                   height: (48 / globalScale) / t.scaleY.abs(),
+                   color: Colors.transparent, // Hit area
+                   alignment: Alignment.center,
+                   child: Container(
+                     width: (20 / globalScale) / t.scaleX.abs(), 
+                     height: (20 / globalScale) / t.scaleY.abs(),
+                     decoration: const BoxDecoration(
+                       color: Colors.green,
+                       shape: BoxShape.circle,
+                     ),
+                   ),
+                 ),
+               ),
+             ),
+           )
+        ];
   }
   
   Widget _buildAbsoluteHandle(double x, double y, Alignment align, double sX, double sY) {
-     double safeSX = sX.abs();
-     if (safeSX < 0.01) safeSX = 0.01;
-     double safeSY = sY.abs();
-     if (safeSY < 0.01) safeSY = 0.01;
-
-     double w = 48 / safeSX;
-     double h = 48 / safeSY;
+     // CONSTANT VISUAL SIZE HANDLES
+     // We want the handle to be 48px visually on Screen.
+     // LocalSize = ScreenSize / GlobalScale.
+     double globalScale = _getGlobalScaleFactor();
+     if (globalScale == 0) globalScale = 1.0;
+     
+     // Note: We also divide by ScaleX/Y because the handle is inside the Scaled Transform?
+     // NO. The Handles are OUTSIDE the Transform in the Stack! 
+     // Wait, let's check build method.
+     // Stack children:
+     // 1. Transform(child: Content) 
+     // 2. PanHandler
+     // 3. Crop UI
+     // 4. Standard UI (Handles) -> _buildStandardUI
+     
+     // The Stack is NOT Scaled. Only the Content is Scaled.
+     // So standard handles are in "Logic Space" (1920x1080).
+     // They are NOT affected by t.scaleX.
+     // BUT we previously divided by sX? "width: 48 / sX".
+     // Why? Because we wanted them to stay small relative to the growing object?
+     // No, if the object grows, and we want constant handle size, we shouldn't divide.
+     
+     // Wait, if I scale the object up 2x, the handles are overlay widgets on top.
+     // If the Stack size grows... No, the Stack size is determined by `IntrinsicWidth(Stack(Child))`.
+     // If `Child` (Video) is 1920x1080, Stack is 1920x1080. 
+     // Scale is applied to the Child Transform ONLY?
+     // Let's check `_buildStandardUI` call site.
+     // It is inside the `Stack`, sibling to `Transform`.
+     // So it is in "Logic Space" (1920x1080).
+     // "FittedBox" scales this entire Stack down to fit Screen (1000px).
+     
+     // So, GlobalScale tells us 1 Logic Px = X Screen Px.
+     // We want Handle = 48 Screen Px.
+     // HandleLogicSize = 48 / GlobalScale.
+     
+     // UN-SCALE Logic:
+     // Visual Size = LogicSize * LocalScale * GlobalScale.
+     // We want Visual Size = 48.
+     // LogicSize = 48 / (LocalScale * GlobalScale).
+     
+     double safeSX = sX.abs(); if (safeSX < 0.001) safeSX = 0.001;
+     double safeSY = sY.abs(); if (safeSY < 0.001) safeSY = 0.001;
+     
+     double w = (48.0 / globalScale) / safeSX;
+     double h = (48.0 / globalScale) / safeSY;
      
      return Positioned(
        left: x - (w / 2), 
@@ -499,8 +604,8 @@ class _TransformGizmoState extends State<TransformGizmo> {
            color: Colors.transparent, // Hit area
            alignment: Alignment.center,
            child: Container(
-             width: 20 / safeSX,
-             height: 20 / safeSY,
+             width: (20 / globalScale) / safeSX,
+             height: (20 / globalScale) / safeSY,
              color: Colors.yellowAccent,
            ),
          ),
@@ -509,33 +614,43 @@ class _TransformGizmoState extends State<TransformGizmo> {
   }
   
   Widget _buildHandle(Alignment align, double scale, double padX, double padY) {
-     double s = scale.abs();
-     if (s < 0.01) s = 0.01;
-
-     // Offset logic:
-     // If Left: left edge is at padX. Handle center should be at padX. Left of handle is padX - radius.
-     // If Right: right edge is at padX. Handle center at (Width - padX). Right of handle is padX - radius.
+     double globalScale = _getGlobalScaleFactor();
+     if (globalScale == 0) globalScale = 1.0;
      
-     // 48 screen px handle -> 48/s width. Radius = 24/s.
-     double radius = 24.0 / s;
+     double safeSX = scale.abs(); if (safeSX < 0.001) safeSX = 0.001;
+     // Note: _buildHandle assumes Uniform scale for positioning in legacy code, 
+     // but here 'scale' input implies uniform? 
+     // Wait, _buildStandardUI passes 't.scaleX' to all.
+     // If Scale is Non-Uniform, this is wrong.
+     // If Unlocked... user can distort.
+     // We should fix _buildHandle to take sX and sY.
+     // But that requires changing call sites.
+     
+     // TEMPORARY FIX: Assume uniform unscaling for handles is "okay enough" 
+     // OR (Better): Read ScaleY from widget.transform since this is method on State.
+     
+     double safeSY = widget.transform.scaleY.abs(); if (safeSY < 0.001) safeSY = 0.001;
+
+     double radiusX = (24.0 / globalScale) / safeSX;
+     double radiusY = (24.0 / globalScale) / safeSY;
      
      return Positioned(
-       left: align.x < 0 ? (padX - radius) : null, 
-       right: align.x > 0 ? (padX - radius) : null,
-       top: align.y < 0 ? (padY - radius) : null,
-       bottom: align.y > 0 ? (padY - radius) : null,
+       left: align.x < 0 ? (padX - radiusX) : null, 
+       right: align.x > 0 ? (padX - radiusX) : null,
+       top: align.y < 0 ? (padY - radiusY) : null,
+       bottom: align.y > 0 ? (padY - radiusY) : null,
        child: GestureDetector(
          behavior: HitTestBehavior.opaque,
          onPanStart: _onPanStart,
          onPanUpdate: (d) => _onScaleUpdate(d, align),
          child: Container(
-           width: 48.0 / s,
-           height: 48.0 / s,
+           width: (48.0 / globalScale) / safeSX,
+           height: (48.0 / globalScale) / safeSY,
            color: Colors.transparent, // Hit area
            alignment: Alignment.center,
            child: Container(
-             width: 20.0 / s,
-             height: 20.0 / s,
+             width: (20.0 / globalScale) / safeSX,
+             height: (20.0 / globalScale) / safeSY,
              color: Colors.blue,
            ),
          ),

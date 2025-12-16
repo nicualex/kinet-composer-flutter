@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:kinet_composer/state/show_state.dart';
@@ -15,13 +16,15 @@ class ProjectTab extends StatefulWidget {
 class _ProjectTabState extends State<ProjectTab> {
   final List<Fixture> _discoveredDevices = [];
   bool _isDiscovering = false;
+  StreamSubscription<Fixture>? _discoverySubscription;
 
   @override
   void initState() {
     super.initState();
     // Start listening to discovery stream
     final discovery = context.read<DiscoveryService>();
-    discovery.deviceStream.listen((device) {
+    _discoverySubscription = discovery.deviceStream.listen((device) {
+      if (!mounted) return;
       setState(() {
         // Dedup by IP
         final index = _discoveredDevices.indexWhere((d) => d.ip == device.ip);
@@ -32,6 +35,12 @@ class _ProjectTabState extends State<ProjectTab> {
         }
       });
     });
+  }
+  
+  @override
+  void dispose() {
+    _discoverySubscription?.cancel();
+    super.dispose();
   }
 
   void _toggleDiscovery() {

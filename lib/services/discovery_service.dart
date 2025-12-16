@@ -121,8 +121,8 @@ class DiscoveryService {
             ip: datagram.address.address,
             port: 6038, // Default KiNET port
             protocol: 'KinetV1', // Default
-            width: json['width'] ?? 0,
-            height: json['height'] ?? 0,
+            width: (json['width'] is int) ? json['width'] : int.tryParse(json['width'].toString()) ?? 0,
+            height: (json['height'] is int) ? json['height'] : int.tryParse(json['height'].toString()) ?? 0,
             pixels: [], // Discovery doesn't usually send full pixel map
           );
           
