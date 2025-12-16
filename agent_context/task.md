@@ -24,4 +24,8 @@
 - [x] Integrate Effects into `VideoTab` (UI, State, Export)
 - [x] Integrate Effects into `VideoTab` (UI, State, Export)
 - [x] Enable Panning in View Mode
-- [ ] Verify Effect Tunability and Export
+- [x] Verify Effect Tunability and Export
+- [x] Refactor Video Workflow
+    - [x] Remove explicit Crop/Zoom toggles (Enable Zoom/Pan by default)
+    - [x] Display Intersection Coordinates (Matrix vs Video) in UI
+    - [x] Ensure Export uses Intersection Logic for Crop/Resolution

@@ -108,84 +108,9 @@ class _ProjectTabState extends State<ProjectTab> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Project Management
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                       Text('Project: ${showState.currentShow?.name ?? "None"}', 
-                           style: Theme.of(context).textTheme.headlineSmall),
-                       const SizedBox(width: 10),
-                       IconButton(
-                         icon: const Icon(Icons.edit, size: 20),
-                         onPressed: () async {
-                            final nameController = TextEditingController(text: showState.currentShow?.name);
-                            final newName = await showDialog<String>(
-                              context: context,
-                              builder: (context) => AlertDialog(
-                                title: const Text("Rename Project"),
-                                content: TextField(
-                                  controller: nameController,
-                                  decoration: const InputDecoration(labelText: "Project Name"),
-                                  autofocus: true,
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(context),
-                                    child: const Text("Cancel"),
-                                  ),
-                                  ElevatedButton(
-                                    onPressed: () {
-                                      Navigator.pop(context, nameController.text);
-                                    },
-                                    child: const Text("Save"),
-                                  ),
-                                ],
-                              ),
-                            );
-                            
-                            if (newName != null && newName.isNotEmpty) {
-                              showState.updateName(newName);
-                            }
-                         },
-                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Text('File: ${showState.fileName ?? "Unsaved"} ${showState.isModified ? "(Modified)" : ""}'),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      ElevatedButton.icon(
-                        onPressed: () => showState.newShow(),
-                        icon: const Icon(Icons.add),
-                        label: const Text('New'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton.icon(
-                        onPressed: () => showState.loadShow(),
-                        icon: const Icon(Icons.folder_open),
-                        label: const Text('Open'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton.icon(
-                        onPressed: (showState.currentShow != null && showState.currentShow!.mediaFile.isNotEmpty)
-                            ? () => showState.saveShow()
-                            : null,
-                        icon: const Icon(Icons.save),
-                        label: const Text('Save'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
+
           
-          const SizedBox(height: 32),
+
           
           // Discovery & Deployment
           Row(

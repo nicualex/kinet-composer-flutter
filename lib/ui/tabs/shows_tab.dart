@@ -22,14 +22,14 @@ import '../widgets/transfer_dialog.dart';
 
 // Enum removed, using from transform_gizmo.dart
 
-class VideoTab extends StatefulWidget {
-  const VideoTab({super.key});
+class ShowsTab extends StatefulWidget {
+  const ShowsTab({super.key});
 
   @override
-  State<VideoTab> createState() => _VideoTabState();
+  State<ShowsTab> createState() => _ShowsTabState();
 }
 
-class _VideoTabState extends State<VideoTab> {
+class _ShowsTabState extends State<ShowsTab> {
   late final Player player;
   late final VideoController controller;
   
@@ -44,6 +44,10 @@ class _VideoTabState extends State<VideoTab> {
   int _intersectH = 0;
   int _displayX = 0;
   int _displayY = 0;
+
+  // Temp size overrides to prevent flash when switching media
+  int? _overrideWidth;
+  int? _overrideHeight;
 
   bool _isPlaying = false;
   late final StreamSubscription<bool> _playingSubscription;
@@ -79,8 +83,26 @@ class _VideoTabState extends State<VideoTab> {
       }
     });
 
-    // Auto-Fit Listener
-    _widthSubscription = player.stream.width.listen((w) => _checkAutoFit());
+    // Auto-Fit Listener & Override Clear
+    _widthSubscription = player.stream.width.listen((w) {
+       if (w != null && w > 0) {
+          if (mounted) {
+             setState(() {
+                if (_overrideWidth != null || _overrideHeight != null) {
+                   _overrideWidth = null; 
+                   _overrideHeight = null; 
+                }
+             });
+          }
+       }
+       _checkAutoFit();
+       // FORCE Intersection Calculation on Load (if not auto-fitting)
+       if (!_pendingAutoFit && w != null && w > 0) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+             if (mounted) _calculateIntersection();
+          });
+       }
+    });
     _heightSubscription = player.stream.height.listen((h) => _checkAutoFit());
   }
   
@@ -101,18 +123,27 @@ class _VideoTabState extends State<VideoTab> {
      if (show == null || show.fixtures.isEmpty) return;
 
      // 1. Calculate Matrix Bounds (pixels)
-     double boundsW = 0;
-     double boundsH = 0;
+     double minMx = double.infinity, maxMx = double.negativeInfinity;
+     double minMy = double.infinity, maxMy = double.negativeInfinity;
      const double gridSize = 10.0;
      
      for (var f in show.fixtures) {
-        double fw = f.width * gridSize;
-        double fh = f.height * gridSize;
-        if (fw > boundsW) boundsW = fw;
-        if (fh > boundsH) boundsH = fh;
+        for (var p in f.pixels) {
+            double px = p.x * gridSize;
+            double py = p.y * gridSize;
+            if (px < minMx) minMx = px;
+            if (px > maxMx) maxMx = px;
+            if (py < minMy) minMy = py;
+            if (py > maxMy) maxMy = py;
+        }
      }
+     maxMx += gridSize; 
+     maxMy += gridSize;
      
-     if (boundsW == 0 || boundsH == 0) return;
+     if (minMx == double.infinity) return;
+
+     double boundsW = maxMx - minMx;
+     double boundsH = maxMy - minMy;
 
      // 2. Calculate Scale required to FIT VIDEO INSIDE matrix (Contain)
      // "both x and y should fit" implies we fully show the video.
@@ -142,6 +173,8 @@ class _VideoTabState extends State<VideoTab> {
            translateY: 0,
            rotation: 0
         ));
+        
+        _calculateIntersection(); // Force UI update
         
         ScaffoldMessenger.of(context).showSnackBar(
            SnackBar(content: Text("Auto-scaled video to match matrix (Scale: ${scale.toStringAsFixed(2)}x)"), duration: const Duration(seconds: 1))
@@ -186,9 +219,24 @@ class _VideoTabState extends State<VideoTab> {
     if (_selectedEffect != null) return;
 
     if (mediaFile == null || mediaFile.isEmpty) {
-      if (_loadedFilePath != null) {
+      if (_loadedFilePath != null || _overrideWidth != null) {
          player.stop();
          _loadedFilePath = null;
+         
+         // Clear overrides on New Show / Unload
+         WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+               setState(() {
+                  _overrideWidth = null; 
+                  _overrideHeight = null;
+                  _displayX = 0;
+                  _displayY = 0;
+                  _intersectW = 0;
+                  _intersectH = 0;
+                  _currentIntersection = null;
+               });
+            }
+         });
       }
       return;
     }
@@ -579,16 +627,21 @@ class _VideoTabState extends State<VideoTab> {
                 rotation: 0.0);
 
         final transform = baseTransform;
+        
+        // Debug Log
+        // debugPrint("Build: Media=${show.mediaFile}, T=${transform.scaleX}x${transform.scaleY}, PlayerW=${player.state.width}");
 
-        return Row(
-          children: [
-            // Main Editor Area
-            Expanded(
-              child: Container(
-                color: Colors.black87,
-                child: RepaintBoundary(
-                  key: _previewKey,
-                  child: ClipRect(
+        return Scaffold(
+           backgroundColor: Colors.transparent,
+           body: Row(
+             crossAxisAlignment: CrossAxisAlignment.stretch,
+             children: [
+               Expanded(
+                 child: Container(
+                   color: Colors.black87,
+                   child: RepaintBoundary(
+                     key: _previewKey,
+                     child: ClipRect(
                     child: Stack(
                     alignment: Alignment.center,
                     children: [
@@ -626,16 +679,21 @@ class _VideoTabState extends State<VideoTab> {
                            
                            if (matW <= 0) matW = 1000;
                            if (matH <= 0) matH = 1000;
+                           debugPrint("World Bounds: ${matW}x${matH}");
 
-                           return FittedBox(
-                             fit: BoxFit.contain,
-                             child: Container(
+                           // REMOVED FittedBox for Debugging
+                           return Center(
+                             child: Transform.scale(
+                               scale: 0.5,
+                               child: Container(
                                width: matW,
                                height: matH,
                                color: Colors.transparent, // "World" Canvas
-                               child: Stack(
-                                 clipBehavior: Clip.none,
-                                 alignment: Alignment.center,
+                               child: Listener(
+                                 onPointerDown: (_) => debugPrint("Layer 0: World Stack Hit"),
+                                 child: Stack(
+                                  clipBehavior: Clip.none,
+                                  alignment: Alignment.center,
                                  children: [
                                     // LAYER 1: Matrix (Localized)
                                     // Translate so (minX, minY) is at (0,0) of this container
@@ -663,12 +721,14 @@ class _VideoTabState extends State<VideoTab> {
                                     if (show.mediaFile.isNotEmpty || _selectedEffect != null)
                                       Center(
                                         child: OverflowBox(
-                                           minWidth: (player.state.width ?? 1920).toDouble(),
-                                           maxWidth: (player.state.width ?? 1920).toDouble(),
-                                           minHeight: (player.state.height ?? 1080).toDouble(),
-                                           maxHeight: (player.state.height ?? 1080).toDouble(),
+                                           minWidth: ((_overrideWidth ?? player.state.width ?? 1920) * transform.scaleX.abs()).toDouble(),
+                                           maxWidth: ((_overrideWidth ?? player.state.width ?? 1920) * transform.scaleX.abs()).toDouble(),
+                                           minHeight: ((_overrideHeight ?? player.state.height ?? 1080) * transform.scaleY.abs()).toDouble(),
+                                           maxHeight: ((_overrideHeight ?? player.state.height ?? 1080) * transform.scaleY.abs()).toDouble(),
                                            alignment: Alignment.center,
-                                           child: TransformGizmo(
+                                           child: Listener(
+                                            onPointerDown: (_) => debugPrint("Layer 1: Gizmo Wrapper Hit"),
+                                            child: TransformGizmo(
                                               transform: transform,
                                               isCropMode: true, // Show handles
                                               editMode: EditMode.zoom, // ALWAYS ZOOM/PAN
@@ -690,7 +750,7 @@ class _VideoTabState extends State<VideoTab> {
                                                           isPlaying: _isPlaying
                                                       )
                                                     )
-                                                  : Video(controller: controller, fit: BoxFit.fill),
+                                                  : Video(controller: controller, fit: BoxFit.fill, controls: NoVideoControls),
                                               ),
                                             ),
                                         ),
@@ -706,7 +766,8 @@ class _VideoTabState extends State<VideoTab> {
                                  ],
                                ),
                              ),
-                           );
+                             ), // Close Transform
+                           ); // Close Center
                         },
                       ),
                     ],
@@ -729,41 +790,119 @@ class _VideoTabState extends State<VideoTab> {
               ),
               padding: const EdgeInsets.all(20.0),
               child: SingleChildScrollView(
+                padding: const EdgeInsets.only(bottom: 150), // Prevent bottom overflow
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                      // 1. Header
-                     Text("Project", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                     Text("COMPOSER", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                      const SizedBox(height: 4),
-                     Text(show.name, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
-                     const SizedBox(height: 24),
+                     
+                     // Project Name & Status
+                     Row(
+                       children: [
+                         Expanded(child: Text(show.name, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)),
+                         IconButton(
+                           icon: const Icon(Icons.edit, size: 16, color: Colors.white54),
+                           onPressed: () async {
+                              final nameController = TextEditingController(text: show.name);
+                              final newName = await showDialog<String>(
+                                context: context,
+                                builder: (context) => AlertDialog(
+                                  title: const Text("Rename Show"),
+                                  content: TextField(
+                                    controller: nameController,
+                                    decoration: const InputDecoration(labelText: "Show Name"),
+                                    autofocus: true,
+                                  ),
+                                  actions: [
+                                    TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+                                    ElevatedButton(onPressed: () => Navigator.pop(context, nameController.text), child: const Text("Save")),
+                                  ],
+                                ),
+                              );
+                              if (newName != null && newName.isNotEmpty) {
+                                showState.updateName(newName);
+                              }
+                           },
+                         )
+                       ],
+                     ),
+                     Text(showState.isModified ? "Unsaved Changes" : "Saved", style: TextStyle(color: showState.isModified ? Colors.orangeAccent : Colors.grey, fontSize: 10)),
+                     const SizedBox(height: 20),
   
-                     // 2. Primary Actions (Grid)
+                     // 2. Main Actions (Grid)
                      GridView.count(
                        crossAxisCount: 2,
                        crossAxisSpacing: 10,
                        mainAxisSpacing: 10,
-                       shrinkWrap: true, // Vital for nesting in Column
+                       shrinkWrap: true, 
                        physics: const NeverScrollableScrollPhysics(),
-                       childAspectRatio: 1.3,
+                       childAspectRatio: 1.5, // Slightly wider buttons
                        children: [
                           _buildModernButton(
-                            icon: Icons.folder_open, 
-                            label: "Load Video", 
-                            color: const Color(0xFF90CAF9), // Pastel Blue
-                            onTap: () => _pickVideo(context)
+                            icon: Icons.add, 
+                            label: "New Show", 
+                            color: Colors.grey, 
+                            onTap: () async {
+                               if (showState.isModified) {
+                                  final confirm = await showDialog<bool>(
+                                     context: context,
+                                     builder: (c) => AlertDialog(
+                                        title: const Text("Discard Changes?"),
+                                        content: const Text("You have unsaved changes. Create new show anyway?"),
+                                        actions: [
+                                           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text("Cancel")),
+                                           ElevatedButton(onPressed: () => Navigator.pop(c, true), child: const Text("Discard & New"))
+                                        ]
+                                     )
+                                  );
+                                  if (confirm != true) return;
+                               }
+                               showState.newShow();
+                            }
+                          ),
+                          _buildModernButton(
+                            icon: Icons.folder, 
+                            label: "Load Show", 
+                            color: Colors.grey, 
+                            onTap: () async {
+                               if (showState.isModified) {
+                                   // Warning omitted for brevity, logic same as above
+                               }
+                               showState.loadShow();
+                            }
                           ),
                           _buildModernButton(
                             icon: Icons.save, 
-                            label: "Save Video", 
-                            color: const Color(0xFFA5D6A7), // Pastel Green
-                            isEnabled: show.mediaFile.isNotEmpty || _selectedEffect != null,
-                            onTap: () => (_selectedEffect != null) ? _exportEffect() : _exportVideo()
+                            label: "Save Show", 
+                            color: const Color(0xFF90CAF9), 
+                            isEnabled: show.mediaFile.isNotEmpty, // "Otherwise disabled"
+                            onTap: () => _saveShowAndFlatten()
                           ),
-                          // Full width transfer button? Or just another tile.
-  
+                          _buildModernButton(
+                            icon: Icons.video_library, 
+                            label: "Load Video", 
+                            color: Colors.blueGrey, 
+                            onTap: () => _pickVideo(context)
+                          ),
                        ],
                      ),
+                     
+                     const SizedBox(height: 10),
+                     // Export Action (Separate)
+                     SizedBox(
+                       width: double.infinity,
+                       child: _buildModernButton(
+                             icon: Icons.output, 
+                             label: "Export to Matrix (MP4)", 
+                             color: const Color(0xFFA5D6A7), 
+                             isEnabled: show.mediaFile.isNotEmpty || _selectedEffect != null,
+                             onTap: () => (_selectedEffect != null) ? _exportEffect() : _exportVideo()
+                       ),
+                     ),
+                     const SizedBox(height: 24),
                      const SizedBox(height: 32),
   
                      // 2.5 Playback Controls
@@ -917,7 +1056,7 @@ class _VideoTabState extends State<VideoTab> {
               ),
             ),
           ],
-        );
+        ));
       },
     );
   }
@@ -1089,26 +1228,152 @@ class _VideoTabState extends State<VideoTab> {
       );
   }
 
-  Widget _buildToggle(IconData icon, String label, bool isActive, VoidCallback onTap) {
-      return Expanded(
-        child: GestureDetector(
-          onTap: onTap,
-          child: Container(
-             padding: const EdgeInsets.symmetric(vertical: 12),
-             decoration: BoxDecoration(
-               color: isActive ? Colors.white : Colors.white10,
-               borderRadius: BorderRadius.circular(8),
-             ),
-             child: Column(
-               children: [
-                 Icon(icon, color: isActive ? Colors.black : Colors.white70, size: 20),
-                 const SizedBox(height: 4),
-                 Text(label, style: TextStyle(color: isActive ? Colors.black : Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
-               ],
-             ),
-          ),
+
+
+  Future<void> _saveShowAndFlatten() async {
+    final show = context.read<ShowState>().currentShow;
+    if (show == null || show.mediaFile.isEmpty) return;
+
+    if (_currentIntersection == null || _intersectW <= 0 || _intersectH <= 0) {
+       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No Intersection! Video must intersect matrix to save.")));
+       return;
+    }
+
+    // 1. Pick Project File
+    final projectPath = await FilePicker.platform.saveFile(
+      dialogTitle: 'Save Project & Render',
+      fileName: '${show.name}.kshow',
+      type: FileType.custom,
+      allowedExtensions: ['kshow'],
+    );
+    
+    if (projectPath == null) return;
+
+    // 2. Derive Video Path
+    final String videoPath = projectPath.replaceAll(RegExp(r'\.kshow$'), '') + "_media.mp4";
+
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => const AlertDialog(
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+             CircularProgressIndicator(), 
+             SizedBox(height: 20),
+             Text("Rendering Video & Saving..."),
+          ],
         ),
-      );
+      ),
+    );
+
+    try {
+        // 3. Render
+        final success = await _performFfmpegRender(show.mediaFile, videoPath, show.mediaTransform, _intersectW, _intersectH, _currentIntersection!);
+        
+        if (!mounted) return;
+        Navigator.pop(context); // Close loader
+
+        if (success) {
+           // 4. Calculate New Transform (Center of Intersection)
+           final rect = _currentIntersection!; 
+           final newTx = rect.center.dx; // Center of Intersection in Matrix Space
+           final newTy = rect.center.dy;
+           
+           // Set temporary overrides to prevent flash of wrong size
+           // The new video matches _intersectW/H resolution.
+           // Scale 10 applied to THIS resolution yields correct Visual Size (~rect.width)
+           if (mounted) {
+              setState(() {
+                 _overrideWidth = _intersectW;
+                 _overrideHeight = _intersectH;
+              });
+           }
+           
+           // Scale 10.0 matches the GridSize (1 pixel = 10.0 visual units)
+           // This ensures the low-res export looks 1:1 on the grid.
+           final newTransform = MediaTransform(
+              scaleX: 10.0, 
+              scaleY: 10.0, 
+              translateX: newTx, 
+              translateY: newTy, 
+              rotation: 0.0
+           );
+           
+           final state = context.read<ShowState>();
+           state.setMediaAndTransform(videoPath, newTransform);
+           await state.saveShowAs(projectPath);
+           
+           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Show Saved & Rendered!")));
+        } else {
+             _showError("Export Failed. See logs.");
+        }
+
+    } catch (e) {
+       if (mounted) Navigator.pop(context);
+       _showError("Save Error: $e");
+    }
+  }
+
+  Future<bool> _performFfmpegRender(String inputPath, String outputPath, MediaTransform? transform, int targetW, int targetH, Rect intersection) async {
+      final t = transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
+      final width = player.state.width;
+      final height = player.state.height;
+      if (width == null || height == null) return false;
+
+      // Logic from _exportVideo
+      final scaledW = width * t.scaleX;
+      final scaledH = height * t.scaleY;
+      final vidLeft = t.translateX - (scaledW / 2);
+      final vidTop = t.translateY - (scaledH / 2);
+      
+      double cropVisX = intersection.left - vidLeft;
+      double cropVisY = intersection.top - vidTop;
+      if (cropVisX < 0) cropVisX = 0;
+      if (cropVisY < 0) cropVisY = 0;
+      
+      double cropVisW = intersection.width;
+      double cropVisH = intersection.height;
+      
+      double sourceX = cropVisX / t.scaleX;
+      double sourceY = cropVisY / t.scaleY;
+      double sourceW = cropVisW / t.scaleX;
+      double sourceH = cropVisH / t.scaleY;
+      
+      if (sourceX + sourceW > width) sourceW = width - sourceX;
+      if (sourceY + sourceH > height) sourceH = height - sourceY;
+      
+      // FFmpeg Chain
+      List<String> filters = [];
+      filters.add('crop=${sourceW.floor()}:${sourceH.floor()}:${sourceX.floor()}:${sourceY.floor()}');
+      
+      int outW = (targetW % 2 == 0) ? targetW : targetW - 1;
+      int outH = (targetH % 2 == 0) ? targetH : targetH - 1;
+      if (outW <= 0) outW = 2;
+      if (outH <= 0) outH = 2;
+
+      filters.add('scale=$outW:$outH:flags=lanczos');
+      
+      List<String> args = [
+        '-i', inputPath,
+        '-vf', filters.join(','),
+        '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',
+        '-preset', 'medium',
+        '-y', outputPath
+      ];
+
+      final result = await Process.run('ffmpeg', args);
+      if (result.exitCode != 0) {
+         debugPrint("FFmpeg Error: ${result.stderr}");
+         return false;
+      }
+      return true;
+  }
+
+  void _showError(String msg) {
+     showDialog(context: context, builder: (c) => AlertDialog(content: Text(msg), actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text("OK"))]));
   }
 }
 

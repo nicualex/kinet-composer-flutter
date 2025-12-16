@@ -16,20 +16,26 @@ class ShowState extends ChangeNotifier {
      _initNewShow();
   }
 
-  void _initNewShow() {
-    // Generate default 100x100 Matrix
+  // Helper to generate pixels for any grid
+  List<Pixel> _generatePixels(int width, int height, String fixtureId) {
     List<Pixel> pixels = [];
-    for (int y = 0; y < 100; y++) {
-      for (int x = 0; x < 100; x++) {
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
         pixels.add(Pixel(
           id: "$x:$y", 
           x: x, 
           y: y, 
-          fixtureId: "matrix-1", 
-          dmxInfo: DmxInfo(universe: 1, channel: 1) // Placeholder DMX
+          fixtureId: fixtureId, 
+          dmxInfo: DmxInfo(universe: 1, channel: 1) // Default or Auto-patch placeholder
         ));
       }
     }
+    return pixels;
+  }
+
+  void _initNewShow() {
+    // Generate default 100x100 Matrix
+    final pixels = _generatePixels(100, 100, "matrix-1");
 
     _currentShow = ShowManifest(
       version: 1,
@@ -50,10 +56,7 @@ class ShowState extends ChangeNotifier {
       settings: PlaybackSettings(loop: true, autoPlay: true),
     );
     _currentFile = null;
-    _isModified = true; // Or false? Usually a new blank show is considered modified until saved, or "unsaved".
-                        // Let's keep it true so it prompts to save?
-                        // Actually, a fresh empty show might not need saving if empty.
-                        // But user request implies standard behaviour.
+    _isModified = true; 
   }
 
   ShowManifest? get currentShow => _currentShow;
@@ -106,13 +109,20 @@ class ShowState extends ChangeNotifier {
       }
     }
 
-    if(_currentFile != null) {
-       final json = _currentShow!.toJson();
-       final content = const JsonEncoder.withIndent('  ').convert(json);
-       await _currentFile!.writeAsString(content);
-       _isModified = false;
-       notifyListeners();
-    }
+    await saveShowAs(_currentFile!.path);
+  }
+
+  Future<void> saveShowAs(String path) async {
+     if (_currentShow == null) return;
+     
+     final file = File(path);
+     final json = _currentShow!.toJson();
+     final content = const JsonEncoder.withIndent('  ').convert(json);
+     await file.writeAsString(content);
+     
+     _currentFile = file;
+     _isModified = false;
+     notifyListeners();
   }
 
   void updateName(String name) {
@@ -169,14 +179,47 @@ class ShowState extends ChangeNotifier {
     }
   }
 
+  void setMediaAndTransform(String mediaPath, MediaTransform? transform) {
+    if (_currentShow != null) {
+       _currentShow = ShowManifest(
+        version: _currentShow!.version,
+        name: _currentShow!.name,
+        mediaFile: mediaPath,
+        mediaTransform: transform,
+        fixtures: _currentShow!.fixtures,
+        settings: _currentShow!.settings,
+      );
+      _isModified = true;
+      notifyListeners();
+    }
+  }
+
   void importFixture(Fixture fixture) {
     if (_currentShow != null) {
+      // GENERATE PIXELS FOR IMPORTED FIXTURE IF EMPTY
+      // Discovery service often returns fixtures without full pixel maps
+      List<Pixel> pixels = fixture.pixels;
+      if (pixels.isEmpty && fixture.width > 0 && fixture.height > 0) {
+         pixels = _generatePixels(fixture.width, fixture.height, fixture.id);
+      }
+
+      final importedFixture = Fixture(
+        id: fixture.id,
+        name: fixture.name,
+        ip: fixture.ip,
+        port: fixture.port,
+        protocol: fixture.protocol,
+        width: fixture.width,
+        height: fixture.height,
+        pixels: pixels
+      );
+
       _currentShow = ShowManifest(
         version: _currentShow!.version,
         name: _currentShow!.name,
         mediaFile: _currentShow!.mediaFile,
         mediaTransform: _currentShow!.mediaTransform,
-        fixtures: [fixture], // Replace existing fixtures with the imported one
+        fixtures: [importedFixture], // Replace existing fixtures with the imported one
         settings: _currentShow!.settings,
       );
       _isModified = true;
@@ -193,22 +236,7 @@ class ShowState extends ChangeNotifier {
     final oldFixture = _currentShow!.fixtures[index];
     
     // Regenerate pixels
-    List<Pixel> newPixels = [];
-    for (int y = 0; y < height; y++) {
-      for (int x = 0; x < width; x++) {
-        // Preserve old pixel DMX if it existed at this coord? 
-        // Or just reset? Simpler to reset for now or try to match.
-        // Let's simple regenerate with default mapping behavior (row major).
-        
-        newPixels.add(Pixel(
-          id: "$x:$y",
-          x: x,
-          y: y,
-          fixtureId: fixtureId,
-          dmxInfo: DmxInfo(universe: 1, channel: 1) // TODO: Auto-patch logic
-        ));
-      }
-    }
+    List<Pixel> newPixels = _generatePixels(width, height, fixtureId);
 
     final newFixture = Fixture(
       id: oldFixture.id,

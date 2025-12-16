@@ -159,6 +159,7 @@ class _TransformGizmoState extends State<TransformGizmo> {
           final box = _contentKey.currentContext!.findRenderObject() as RenderBox;
           intrinsicSize = box.size;
       }
+      debugPrint("Gizmo: PanUpdate. Intrinsic=$intrinsicSize, Transform=${_initialTransform?.scaleX}");
 
       Offset globalDelta = details.globalPosition - _dragStart!;
       
@@ -468,18 +469,22 @@ class _TransformGizmoState extends State<TransformGizmo> {
               ],
             );
           },
-        ),
+      ),
       ); 
   }
 
   Widget _buildPanHandler() {
       return Positioned.fill(
-         child: GestureDetector(
-           behavior: HitTestBehavior.translucent, // Catches taps on empty space
-           onPanStart: _onPanStart,
-           onPanUpdate: _onTranslateUpdate,
-           onDoubleTap: widget.onDoubleTap,
-           child: Container(color: Colors.transparent), 
+         child: Listener(
+           onPointerDown: (_) => debugPrint("Gizmo: POINTER DOWN!"),
+           onPointerUp: (_) => debugPrint("Gizmo: POINTER UP!"),
+           child: GestureDetector(
+             behavior: HitTestBehavior.opaque, // FORCE OPAQUE capture
+             onPanStart: (d) { debugPrint("Gizmo: PanStart"); _onPanStart(d); },
+             onPanUpdate: _onTranslateUpdate,
+             onDoubleTap: widget.onDoubleTap,
+             child: Container(color: Colors.transparent),  
+           ),
          )
       );
   }
@@ -588,8 +593,9 @@ class _TransformGizmoState extends State<TransformGizmo> {
      double safeSX = sX.abs(); if (safeSX < 0.001) safeSX = 0.001;
      double safeSY = sY.abs(); if (safeSY < 0.001) safeSY = 0.001;
      
-     double w = (48.0 / globalScale) / safeSX;
-     double h = (48.0 / globalScale) / safeSY;
+     // INCREASED HIT AREA TO 96px
+     double w = (96.0 / globalScale) / safeSX;
+     double h = (96.0 / globalScale) / safeSY;
      
      return Positioned(
        left: x - (w / 2), 
@@ -631,8 +637,9 @@ class _TransformGizmoState extends State<TransformGizmo> {
      
      double safeSY = widget.transform.scaleY.abs(); if (safeSY < 0.001) safeSY = 0.001;
 
-     double radiusX = (24.0 / globalScale) / safeSX;
-     double radiusY = (24.0 / globalScale) / safeSY;
+     // INCREASED HIT AREA TO 96px (Radius 48)
+     double radiusX = (48.0 / globalScale) / safeSX;
+     double radiusY = (48.0 / globalScale) / safeSY;
      
      return Positioned(
        left: align.x < 0 ? (padX - radiusX) : null, 
@@ -644,8 +651,8 @@ class _TransformGizmoState extends State<TransformGizmo> {
          onPanStart: _onPanStart,
          onPanUpdate: (d) => _onScaleUpdate(d, align),
          child: Container(
-           width: (48.0 / globalScale) / safeSX,
-           height: (48.0 / globalScale) / safeSY,
+           width: (96.0 / globalScale) / safeSX,
+           height: (96.0 / globalScale) / safeSY,
            color: Colors.transparent, // Hit area
            alignment: Alignment.center,
            child: Container(

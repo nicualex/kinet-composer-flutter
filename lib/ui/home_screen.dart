@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:kinet_composer/ui/tabs/project_tab.dart';
-import 'package:kinet_composer/ui/tabs/setup_tab.dart';
-import 'package:kinet_composer/ui/tabs/video_tab.dart';
+import 'package:kinet_composer/ui/tabs/utilities_tab.dart';
+import 'package:kinet_composer/ui/tabs/shows_tab.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -9,7 +8,7 @@ class HomeScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 3,
+      length: 2,
       child: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -35,18 +34,16 @@ class HomeScreen extends StatelessWidget {
               labelColor: Colors.cyanAccent,
               unselectedLabelColor: Colors.white54,
               tabs: [
+                Tab(icon: Icon(Icons.settings), text: 'Utilities'),
                 Tab(icon: Icon(Icons.slideshow), text: 'Shows'),
-                Tab(icon: Icon(Icons.grid_on), text: 'Setup'),
-                Tab(icon: Icon(Icons.movie_creation), text: 'Videos / Effects'),
               ],
             ),
           ),
           body: const TabBarView(
             physics: NeverScrollableScrollPhysics(),
             children: [
-              ProjectTab(),
-              SetupTab(),
-              VideoTab(),
+              UtilitiesTab(),
+              ShowsTab(),
             ],
           ),
         ),
