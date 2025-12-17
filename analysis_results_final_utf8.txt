@@ -1,0 +1,56 @@
+﻿Resolving dependencies...
+Downloading packages...
+  characters 1.4.0 (1.4.1 available)
+Got dependencies!
+1 package has newer versions incompatible with dependency constraints.
+Try `flutter pub outdated` for more information.
+Analyzing kinet-composer-flutter...                             
+
+   info - The imported package 'http_parser' isn't a dependency of the importing package - lib\services\file_uploader.dart:3:8 - depend_on_referenced_packages
+   info - The imported package 'path' isn't a dependency of the importing package - lib\services\file_uploader.dart:4:8 - depend_on_referenced_packages
+   info - The imported package 'path' isn't a dependency of the importing package - lib\state\show_state.dart:7:8 - depend_on_referenced_packages
+   info - 'translate' is deprecated and shouldn't be used. Use translateByVector3, translateByVector4, or translateByDouble instead - lib\ui\tabs\setup_tab.dart:93:9 - deprecated_member_use
+   info - 'scale' is deprecated and shouldn't be used. Use scaleByVector3, scaleByVector4, or scaleByDouble instead - lib\ui\tabs\setup_tab.dart:94:9 - deprecated_member_use
+   info - 'translate' is deprecated and shouldn't be used. Use translateByVector3, translateByVector4, or translateByDouble instead - lib\ui\tabs\setup_tab.dart:95:9 - deprecated_member_use
+   info - 'translate' is deprecated and shouldn't be used. Use translateByVector3, translateByVector4, or translateByDouble instead - lib\ui\tabs\setup_tab.dart:166:33 - deprecated_member_use
+   info - 'scale' is deprecated and shouldn't be used. Use scaleByVector3, scaleByVector4, or scaleByDouble instead - lib\ui\tabs\setup_tab.dart:167:33 - deprecated_member_use
+   info - 'translate' is deprecated and shouldn't be used. Use translateByVector3, translateByVector4, or translateByDouble instead - lib\ui\tabs\setup_tab.dart:168:33 - deprecated_member_use
+warning - Unused import: '../widgets/transfer_dialog.dart' - lib\ui\tabs\shows_tab.dart:21:8 - unused_import
+warning - The declaration '_captureThumbnail' isn't referenced - lib\ui\tabs\shows_tab.dart:347:17 - unused_element
+   info - Unnecessary braces in a string interpolation - lib\ui\tabs\shows_tab.dart:401:46 - unnecessary_brace_in_string_interps
+   info - Unnecessary braces in a string interpolation - lib\ui\tabs\shows_tab.dart:664:62 - unnecessary_brace_in_string_interps
+   info - Use a 'SizedBox' to add whitespace to a layout - lib\ui\tabs\shows_tab.dart:723:54 - sized_box_for_whitespace
+   info - Unnecessary braces in a string interpolation - lib\ui\tabs\shows_tab.dart:942:60 - unnecessary_brace_in_string_interps
+   info - Unnecessary braces in a string interpolation - lib\ui\tabs\shows_tab.dart:944:61 - unnecessary_brace_in_string_interps
+   info - Use interpolation to compose strings and values - lib\ui\tabs\shows_tab.dart:1227:30 - prefer_interpolation_to_compose_strings
+   info - Don't use 'BuildContext's across async gaps - lib\ui\tabs\shows_tab.dart:1282:33 - use_build_context_synchronously
+warning - Unused import: 'dart:convert' - lib\ui\tabs\video_tab.dart:3:8 - unused_import
+warning - Unused import: '../widgets/transfer_dialog.dart' - lib\ui\tabs\video_tab.dart:21:8 - unused_import
+warning - The value of the field '_previewKey' isn't used - lib\ui\tabs\video_tab.dart:64:19 - unused_field
+  error - The name '_previewKey' is already defined - lib\ui\tabs\video_tab.dart:66:19 - duplicate_definition
+warning - The declaration '_captureThumbnail' isn't referenced - lib\ui\tabs\video_tab.dart:299:17 - unused_element
+   info - Unnecessary braces in a string interpolation - lib\ui\tabs\video_tab.dart:353:46 - unnecessary_brace_in_string_interps
+warning - The operand can't be 'null', so the condition is always 'true' - lib\ui\tabs\video_tab.dart:449:29 - unnecessary_null_comparison
+   info - Use a 'SizedBox' to add whitespace to a layout - lib\ui\tabs\video_tab.dart:665:54 - sized_box_for_whitespace
+   info - Unnecessary braces in a string interpolation - lib\ui\tabs\video_tab.dart:798:60 - unnecessary_brace_in_string_interps
+   info - Unnecessary braces in a string interpolation - lib\ui\tabs\video_tab.dart:800:61 - unnecessary_brace_in_string_interps
+   info - Parameter 'key' could be a super parameter - lib\ui\widgets\transfer_dialog.dart:12:9 - use_super_parameters
+warning - The value of the field '_transferProgress' isn't used - lib\ui\widgets\transfer_dialog.dart:19:29 - unused_field
+   info - The variable name 'dx_local_px' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:92:15 - non_constant_identifier_names
+   info - The variable name 'dy_local_px' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:93:15 - non_constant_identifier_names
+   info - The variable name 'dx_content' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:96:15 - non_constant_identifier_names
+   info - The variable name 'dy_content' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:97:15 - non_constant_identifier_names
+   info - The variable name 'dx_local' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:168:14 - non_constant_identifier_names
+   info - The variable name 'dy_local' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:169:14 - non_constant_identifier_names
+   info - The variable name 'dx_logic' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:178:14 - non_constant_identifier_names
+   info - The variable name 'dy_logic' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:179:14 - non_constant_identifier_names
+   info - The variable name 'dx_local_px' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:278:14 - non_constant_identifier_names
+   info - The variable name 'dy_local_px' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:279:14 - non_constant_identifier_names
+   info - The variable name 'dx_content' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:287:14 - non_constant_identifier_names
+   info - The variable name 'dy_content' isn't a lowerCamelCase identifier - lib\ui\widgets\transform_gizmo.dart:288:14 - non_constant_identifier_names
+warning - The value of the local variable 'sX' isn't used - lib\ui\widgets\transform_gizmo.dart:363:18 - unused_local_variable
+warning - The value of the local variable 'sY' isn't used - lib\ui\widgets\transform_gizmo.dart:364:18 - unused_local_variable
+   info - 'translate' is deprecated and shouldn't be used. Use translateByVector3, translateByVector4, or translateByDouble instead - lib\ui\widgets\transform_gizmo.dart:378:21 - deprecated_member_use
+   info - 'scale' is deprecated and shouldn't be used. Use scaleByVector3, scaleByVector4, or scaleByDouble instead - lib\ui\widgets\transform_gizmo.dart:380:21 - deprecated_member_use
+warning - Unused import: 'package:flutter/material.dart' - test\effect_service_test.dart:3:8 - unused_import
+

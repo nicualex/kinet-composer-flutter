@@ -228,7 +228,7 @@ class _SetupTabState extends State<SetupTab> {
                            title: Text(f.name, style: const TextStyle(color: Colors.white)),
                            subtitle: Text("${f.width}x${f.height}", style: const TextStyle(color: Colors.grey)),
                            selected: isSelected,
-                           selectedTileColor: Colors.blue.withOpacity(0.2),
+                           selectedTileColor: Colors.blue.withValues(alpha: 0.2),
                            onTap: () => _selectFixture(f),
                          );
                        },

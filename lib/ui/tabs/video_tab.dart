@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:convert';
+
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
@@ -13,12 +13,16 @@ import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/show_manifest.dart';
+import '../../models/media_transform.dart';
 import '../../state/show_state.dart';
 import '../../services/effect_service.dart';
 import '../widgets/pixel_grid_painter.dart';
 import '../widgets/transform_gizmo.dart';
 import '../widgets/effect_renderer.dart';
 import '../widgets/transfer_dialog.dart';
+import '../widgets/layer_renderer.dart';
+import '../../models/layer_config.dart';
+import '../widgets/glass_container.dart';
 
 // Enum removed, using from transform_gizmo.dart
 
@@ -30,10 +34,14 @@ class VideoTab extends StatefulWidget {
 }
 
 class _VideoTabState extends State<VideoTab> {
-  late final Player player;
-  late final VideoController controller;
+  late final Player _bgPlayer;
+  late final VideoController _bgController;
+  late final Player _fgPlayer;
+  late final VideoController _fgController;
   
-  String? _loadedFilePath;
+
+  
+  bool _isForegroundSelected = false; // False = Background, True = Foreground
   
   // REMOVED: bool _isEditingCrop = false;
   // REMOVED: MediaTransform? _tempTransform;
@@ -58,20 +66,22 @@ class _VideoTabState extends State<VideoTab> {
 
   // NEW: Effects State
   EffectType? _selectedEffect;
-  Map<String, double> _effectParams = {};
+  // REMOVED: Map<String, double> _effectParams = {};
   
   final GlobalKey _previewKey = GlobalKey(); // For Snapshot
   
-  // Debounce for fit
-  Timer? _fitDebounce;
+
 
   @override
   void initState() {
     super.initState();
-    player = Player();
-    controller = VideoController(player);
+    _bgPlayer = Player();
+    _bgController = VideoController(_bgPlayer);
     
-    _playingSubscription = player.stream.playing.listen((playing) {
+    _fgPlayer = Player();
+    _fgController = VideoController(_fgPlayer);
+    
+    _playingSubscription = _bgPlayer.stream.playing.listen((playing) {
       if (mounted) {
         setState(() {
           _isPlaying = playing;
@@ -79,16 +89,16 @@ class _VideoTabState extends State<VideoTab> {
       }
     });
 
-    // Auto-Fit Listener
-    _widthSubscription = player.stream.width.listen((w) => _checkAutoFit());
-    _heightSubscription = player.stream.height.listen((h) => _checkAutoFit());
+    // Auto-Fit Listener (On Background Video)
+    _widthSubscription = _bgPlayer.stream.width.listen((w) => _checkAutoFit());
+    _heightSubscription = _bgPlayer.stream.height.listen((h) => _checkAutoFit());
   }
   
   void _checkAutoFit() {
      if (!_pendingAutoFit) return;
      
-     final w = player.state.width;
-     final h = player.state.height;
+     final w = _bgPlayer.state.width;
+     final h = _bgPlayer.state.height;
      
      if (w != null && h != null && w > 0 && h > 0) {
         _autoFitVideoToMatrix(w, h);
@@ -154,59 +164,26 @@ class _VideoTabState extends State<VideoTab> {
     _playingSubscription.cancel();
     _widthSubscription.cancel();
     _heightSubscription.cancel();
-    player.dispose();
+    _bgPlayer.dispose();
+    _fgPlayer.dispose();
     super.dispose();
   }
 
   Future<void> _pickVideo(BuildContext context) async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.video,
-      dialogTitle: 'Select Video File',
+      dialogTitle: 'Select Video File (${_isForegroundSelected ? "Foreground" : "Background"})',
     );
 
     if (result != null && result.files.single.path != null) {
       final path = result.files.single.path!;
       if (context.mounted) {
-        // RESET Logic:
-        setState(() {
-           // _isEditingCrop = false;
-           // _tempTransform = null;
-           _selectedEffect = null; // Clear effect
-           _pendingAutoFit = true; // Trigger auto-fit on next load
-        });
-
-        // 2. Update Media in ShowState (which resets transform to defaults)
-        context.read<ShowState>().updateMedia(path);
+         context.read<ShowState>().updateLayer(
+            isForeground: _isForegroundSelected,
+            type: LayerType.video,
+            path: path
+         );
       }
-    }
-  }
-
-  void _syncPlayer(String? mediaFile) {
-    // If effect mode is active, don't sync player to user interactions yet or pause it logic
-    if (_selectedEffect != null) return;
-
-    if (mediaFile == null || mediaFile.isEmpty) {
-      if (_loadedFilePath != null) {
-         player.stop();
-         _loadedFilePath = null;
-      }
-      return;
-    }
-
-    if (_loadedFilePath != mediaFile) {
-      player.open(Media(mediaFile), play: true);
-      player.setPlaylistMode(PlaylistMode.loop);
-      _loadedFilePath = mediaFile;
-      
-      // Safety check: ensure local state is clean when a new video plays
-       WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
-             setState(() {
-               // _isEditingCrop = false;
-               // _tempTransform = null;
-             });
-          }
-       });
     }
   }
 
@@ -240,7 +217,17 @@ class _VideoTabState extends State<VideoTab> {
      );
 
      try {
-        final filter = EffectService.getFFmpegFilter(_selectedEffect!, _effectParams);
+       // Use params from storage
+       final activeLayer = show.backgroundLayer; // TODO: or foreground? Effect export implies active?
+       // _exportEffect logic currently uses _selectedEffect.
+       // Let's assume we export the effect that is currently selected/edited.
+       
+        final filter = EffectService.getFFmpegFilter(
+           _selectedEffect ?? EffectType.rainbow, 
+           // _effectParams was removed. Use active layer params.
+           // Which layer? _selectedEffect implies we are editing one.
+           (_isForegroundSelected ? show.foregroundLayer : show.backgroundLayer).effectParams
+        );
         // Use system ffmpeg
         const String ffmpegPath = 'ffmpeg';
         
@@ -317,33 +304,26 @@ class _VideoTabState extends State<VideoTab> {
      }
   }
 
-  Future<void> _showTransferDialog() async {
-     // 1. Capture Thumbnail
-     final thumb = await _captureThumbnail();
-     if (thumb == null) {
-       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Failed to capture thumbnail")));
-       return;
-     }
 
-     if (!mounted) return;
-     
-     // 2. Show Dialog
-     showDialog(
-       context: context,
-       barrierDismissible: false,
-       builder: (c) => TransferDialog(thumbnail: thumb),
-     );
-  }
 
   Future<void> _exportVideo() async {
     final show = context.read<ShowState>().currentShow;
     if (show == null || show.mediaFile.isEmpty) return;
 
-    // Must have intersection to export
-    if (_currentIntersection == null || _intersectW <= 0 || _intersectH <= 0) {
-       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No Intersection with Matrix! Move video over matrix to export.")));
-       return;
-    }
+     // Must have intersection to export
+     if (_currentIntersection == null || _intersectW <= 0 || _intersectH <= 0) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No Intersection with Matrix! Move video over matrix to export.")));
+        return;
+     }
+
+     // TODO: Support exporting composition of both layers?
+     // For now, export background layer if it's a video.
+     if (show.backgroundLayer.type != LayerType.video || show.backgroundLayer.path == null) {
+         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Background layer is not a video. Export not supported yet.")));
+         return;
+     }
+     
+     final sourcePath = show.backgroundLayer.path!;
 
     final outputPath = await FilePicker.platform.saveFile(
       dialogTitle: 'Save Exported Video',
@@ -374,11 +354,11 @@ class _VideoTabState extends State<VideoTab> {
     );
 
     try {
-      final baseT = show.mediaTransform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
+      final baseT = show.backgroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
       final t = baseT;
       
-      final width = player.state.width;
-      final height = player.state.height;
+       final width = _bgPlayer.state.width;
+       final height = _bgPlayer.state.height;
 
       // 1. Calculate Source Crop based on Intersection
       // The intersection is in "Visual Logic Space" (where GridSize is 10.0)
@@ -444,8 +424,8 @@ class _VideoTabState extends State<VideoTab> {
       // Use system ffmpeg
       const String ffmpegPath = 'ffmpeg';
 
-      List<String> args = [
-        '-i', show.mediaFile,
+       List<String> args = [
+         '-i', sourcePath,
         '-vf', filterString,
         '-c:v', 'libx264',
         '-pix_fmt', 'yuv420p',
@@ -494,8 +474,8 @@ class _VideoTabState extends State<VideoTab> {
     final show = context.read<ShowState>().currentShow;
     if (show == null || show.fixtures.isEmpty) return;
 
-    final width = player.state.width;
-    final height = player.state.height;
+    final width = _bgPlayer.state.width;
+    final height = _bgPlayer.state.height;
     if (width == null || height == null) return;
     
     // 1. Calculate Matrix Bounds in "Pixel" space (10.0 scale)
@@ -544,14 +524,17 @@ class _VideoTabState extends State<VideoTab> {
     
     setState(() {
        // _isEditingCrop = false;
-       context.read<ShowState>().updateTransform(MediaTransform(
-          scaleX: targetScaleX,
-          scaleY: targetScaleY,
-          translateX: 0,
-          translateY: 0,
-          rotation: 0,
-          crop: null, // Reset crop
-       ));
+       context.read<ShowState>().updateLayer(
+         isForeground: _isForegroundSelected, 
+         transform: MediaTransform(
+            scaleX: targetScaleX,
+            scaleY: targetScaleY,
+            translateX: 0,
+            translateY: 0,
+            rotation: 0,
+            crop: null,
+         )
+       );
     });
     
     debugPrint("Auto-Fit Applied");
@@ -568,17 +551,13 @@ class _VideoTabState extends State<VideoTab> {
           return const Center(child: Text("Create or Load a Show first"));
         }
 
-        _syncPlayer(show.mediaFile);
+        _syncLayers(show);
 
-        final baseTransform = show.mediaTransform ??
-            MediaTransform(
-                scaleX: 1.0,
-                scaleY: 1.0,
-                translateX: 0.0,
-                translateY: 0.0,
-                rotation: 0.0);
 
-        final transform = baseTransform;
+        
+        // Define active layer helper variables for UI
+        final activeLayer = _isForegroundSelected ? show.foregroundLayer : show.backgroundLayer;
+        final activeParams = activeLayer.effectParams;
 
         return Row(
           children: [
@@ -652,57 +631,76 @@ class _VideoTabState extends State<VideoTab> {
                                         ),
                                       ),
                                     
-                                    // LAYER 2: Video (Gizmo)
-                                    // We need to place the Video Logic Center at the Canvas Logic Center.
-                                    // Canvas Center = (matW/2, matH/2).
-                                    // Gizmo is centered by 'Alignment.center' of Stack?
-                                    // Stack size is matW, matH. 
-                                    // Alignment.center puts child center at (matW/2, matH/2).
-                                    // So this aligns perfectly!
-                                    
-                                    if (show.mediaFile.isNotEmpty || _selectedEffect != null)
-                                      Center(
-                                        child: OverflowBox(
-                                           minWidth: (player.state.width ?? 1920).toDouble(),
-                                           maxWidth: (player.state.width ?? 1920).toDouble(),
-                                           minHeight: (player.state.height ?? 1080).toDouble(),
-                                           maxHeight: (player.state.height ?? 1080).toDouble(),
-                                           alignment: Alignment.center,
-                                           child: TransformGizmo(
-                                              transform: transform,
-                                              isCropMode: true, // Show handles
-                                              editMode: EditMode.zoom, // ALWAYS ZOOM/PAN
-                                              lockAspect: _lockAspectRatio,
-                                              onDoubleTap: _fitToMatrix,
-                                              onUpdate: (newTransform) {
-                                                   showState.updateTransform(newTransform);
-                                                   _calculateIntersection(); // Update UI info
-                                              },
-                                              child: Container(
-                                                width: (player.state.width ?? 1920).toDouble(),
-                                                height: (player.state.height ?? 1080).toDouble(),
-                                                child: (_selectedEffect != null) 
-                                                  ? AspectRatio(
-                                                      aspectRatio: 16 / 9,
-                                                      child: EffectRenderer(
-                                                          type: _selectedEffect, 
-                                                          params: _effectParams,
-                                                          isPlaying: _isPlaying
-                                                      )
-                                                    )
-                                                  : Video(controller: controller, fit: BoxFit.fill),
+                                   // LAYER 2: Video/Effects Composition
+                                    Center(
+                                      child: OverflowBox(
+                                          minWidth: (_bgPlayer.state.width ?? 1920).toDouble(),
+                                          maxWidth: (_bgPlayer.state.width ?? 1920).toDouble(),
+                                          minHeight: (_bgPlayer.state.height ?? 1080).toDouble(),
+                                          maxHeight: (_bgPlayer.state.height ?? 1080).toDouble(),
+                                          alignment: Alignment.center,
+                                          child: Stack(
+                                            children: [
+                                              // 1. Background Layer (Bottom)
+                                              IgnorePointer(
+                                                ignoring: _isForegroundSelected, // Ignore if FG is selected (Pass-through NOT ensuring BG capture, but BG is behind)
+                                                // Actually, if FG is on top and ignoring, click goes to BG.
+                                                // If FG is on top and NOT ignoring, click goes to FG.
+                                                child: TransformGizmo(
+                                                  transform: show.backgroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0),
+                                                  isCropMode: true,
+                                                  editMode: EditMode.zoom,
+                                                  lockAspect: _lockAspectRatio,
+                                                  onDoubleTap: _fitToMatrix,
+                                                  onUpdate: (newTransform) {
+                                                    // Only update if BG is selected (redundant check but safe)
+                                                    if (!_isForegroundSelected) {
+                                                      showState.updateLayer(isForeground: false, transform: newTransform);
+                                                      _calculateIntersection();
+                                                    }
+                                                  },
+                                                  child: SizedBox(
+                                                    width: (_bgPlayer.state.width ?? 1920).toDouble(),
+                                                    height: (_bgPlayer.state.height ?? 1080).toDouble(),
+                                                    child: LayerRenderer(
+                                                      layer: show.backgroundLayer,
+                                                      controller: _bgController
+                                                    ),
+                                                  ),
+                                                ),
                                               ),
-                                            ),
-                                        ),
-                                      )
-                                     else
-                                      const Center(
-                                        child: Text(
-                                          "No video loaded.\nUse 'Load Video' on the right panel.",
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(color: Colors.white54, fontSize: 40), // Large text for large world
-                                        ),
+
+                                              // 2. Foreground Layer (Top)
+                                              IgnorePointer(
+                                                ignoring: !_isForegroundSelected, // Ignore if BG is selected
+                                                child: TransformGizmo(
+                                                  transform: show.foregroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0),
+                                                  isCropMode: true,
+                                                  editMode: EditMode.zoom,
+                                                  lockAspect: _lockAspectRatio,
+                                                  onDoubleTap: _fitToMatrix,
+                                                  onUpdate: (newTransform) {
+                                                    if (_isForegroundSelected) {
+                                                      showState.updateLayer(isForeground: true, transform: newTransform);
+                                                      _calculateIntersection();
+                                                    }
+                                                  },
+                                                  child: SizedBox(
+                                                    width: (_bgPlayer.state.width ?? 1920).toDouble(), // Use BG dimensions for now as reference? Or FG player dimensions?
+                                                    // Effect might default to 1920x1080.
+                                                    // If FG is video, prefer FG dimensions.
+                                                    height: (_bgPlayer.state.height ?? 1080).toDouble(),
+                                                    child: LayerRenderer(
+                                                      layer: show.foregroundLayer,
+                                                      controller: _fgController
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
                                       ),
+                                    ),
                                  ],
                                ),
                              ),
@@ -717,25 +715,141 @@ class _VideoTabState extends State<VideoTab> {
           ),
 
 
-            // NEW: Modern Sidebar
-            Container(
-              width: 320,
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E1E1E), // Dark charcoal
-                border: const Border(left: BorderSide(color: Colors.white12)),
-                boxShadow: [
-                   BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 10, offset: const Offset(-2, 0))
-                ]
-              ),
+            // Glass Sidebar
+            GlassContainer(
               padding: const EdgeInsets.all(20.0),
-              child: SingleChildScrollView(
+              tint: Colors.black, // Dark panel
+              opacity: 0.95,       // Almost opaque for visibility
+              borderRadius: const BorderRadius.only(topLeft: Radius.circular(16), bottomLeft: Radius.circular(16)),
+              border: const Border(left: BorderSide(color: Colors.white24)), // Brighter border
+              child: SizedBox(
+                width: 320,
+                child: SingleChildScrollView(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                      // 1. Header
-                     Text("Project", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                     Text("PROJECT LAYERS", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                     const SizedBox(height: 12),
+                     
+                     // Layer Toggle
+                     Container(
+                        decoration: BoxDecoration(
+                           color: Colors.white24, // Brighter track
+                           borderRadius: BorderRadius.circular(8),
+                           border: Border.all(color: Colors.white12)
+                        ),
+                        padding: const EdgeInsets.all(4),
+                        child: Row(
+                           children: [
+                              Expanded(
+                                 child: GestureDetector(
+                                    onTap: () => setState(() => _isForegroundSelected = false),
+                                    child: AnimatedContainer(
+                                       duration: const Duration(milliseconds: 200),
+                                       padding: const EdgeInsets.symmetric(vertical: 10), // Taller hit area
+                                       decoration: BoxDecoration(
+                                          color: !_isForegroundSelected ? Colors.blue : Colors.transparent, // Opaque Blue
+                                          borderRadius: BorderRadius.circular(6),
+                                          boxShadow: !_isForegroundSelected ? [
+                                             BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 4, offset: const Offset(0, 2))
+                                          ] : null
+                                       ),
+                                       child: Center(child: Text("BACKGROUND", style: TextStyle(
+                                          color: !_isForegroundSelected ? Colors.white : Colors.white70, 
+                                          fontWeight: FontWeight.bold, 
+                                          fontSize: 12,
+                                          letterSpacing: 1.0
+                                       ))),
+                                    ),
+                                 ),
+                              ),
+                              Expanded(
+                                 child: GestureDetector(
+                                    onTap: () => setState(() => _isForegroundSelected = true),
+                                    child: AnimatedContainer(
+                                       duration: const Duration(milliseconds: 200),
+                                       padding: const EdgeInsets.symmetric(vertical: 10),
+                                       decoration: BoxDecoration(
+                                          color: _isForegroundSelected ? Colors.purpleAccent : Colors.transparent, // Different color for FG for distinction? Or just Blue? Let's use Blue for consistency or Purple for FG differentiation. Let's stick to Blue for now for "Active" state consistency, or maybe an accent color.
+                                          // Actually, let's use the same Active Color (Blue) to imply "Selected".
+                                          // OR: Background = Blue, Foreground = Purple? 
+                                          // Let's use Blue for both to reduce cognitive load.
+                                          color: _isForegroundSelected ? Colors.blue : Colors.transparent, 
+                                          borderRadius: BorderRadius.circular(6),
+                                          boxShadow: _isForegroundSelected ? [
+                                             BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 4, offset: const Offset(0, 2))
+                                          ] : null
+                                       ),
+                                       child: Center(child: Text("FOREGROUND", style: TextStyle(
+                                          color: _isForegroundSelected ? Colors.white : Colors.white70, 
+                                          fontWeight: FontWeight.bold, 
+                                          fontSize: 12,
+                                          letterSpacing: 1.0
+                                       ))),
+                                    ),
+                                 ),
+                              ),
+                           ],
+                        ),
+                     ),
+                     const SizedBox(height: 24),
+                     
+                     Text("${_isForegroundSelected ? "FOREGROUND" : "BACKGROUND"} SETTINGS", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                      const SizedBox(height: 4),
-                     Text(show.name, style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold)),
+                     
+                     // Opacity Slider
+                     Text("Opacity: ${(_isForegroundSelected ? show.foregroundLayer.opacity : show.backgroundLayer.opacity).toStringAsFixed(2)}", style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                     Slider(
+                        value: _isForegroundSelected ? show.foregroundLayer.opacity : show.backgroundLayer.opacity,
+                        min: 0.0,
+                        max: 1.0,
+                        activeColor: const Color(0xFF90CAF9),
+                        inactiveColor: Colors.white12,
+                        onChanged: (v) {
+                           context.read<ShowState>().updateLayer(
+                              isForeground: _isForegroundSelected, 
+                              opacity: v
+                           );
+                        },
+                     ),
+                     const SizedBox(height: 12),
+                     
+                     // Active Layer Info
+                     Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.05), borderRadius: BorderRadius.circular(8)),
+                        child: Row(
+                           children: [
+                              Icon(
+                                 (_isForegroundSelected ? show.foregroundLayer.type : show.backgroundLayer.type) == LayerType.video ? Icons.movie : Icons.auto_fix_high,
+                                 color: Colors.white70, size: 20
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                   (_isForegroundSelected ? show.foregroundLayer.type : show.backgroundLayer.type) == LayerType.none 
+                                      ? "No Content" 
+                                      : ((_isForegroundSelected ? show.foregroundLayer.path : show.backgroundLayer.path) ?? "Effect"),
+                                   overflow: TextOverflow.ellipsis,
+                                   style: const TextStyle(color: Colors.white, fontSize: 12)
+                                ),
+                              ),
+                              IconButton(
+                                 icon: const Icon(Icons.close, size: 16, color: Colors.white54),
+                                 onPressed: () {
+                                    context.read<ShowState>().updateLayer(
+                                       isForeground: _isForegroundSelected,
+                                       type: LayerType.none,
+                                       path: null,
+                                       effect: null
+                                    );
+                                 },
+                              )
+                           ],
+                        ),
+                     ),
+                     
                      const SizedBox(height: 24),
   
                      // 2. Primary Actions (Grid)
@@ -748,17 +862,19 @@ class _VideoTabState extends State<VideoTab> {
                        childAspectRatio: 1.3,
                        children: [
                           _buildModernButton(
-                            icon: Icons.folder_open, 
+                            icon: Icons.upload_file, 
                             label: "Load Video", 
                             color: const Color(0xFF90CAF9), // Pastel Blue
                             onTap: () => _pickVideo(context)
                           ),
+                          // Only save show (bundle), not individual video export for now in this button?
+                          // Keeping it as "Save Video" (Export) but warning it only exports bg.
                           _buildModernButton(
                             icon: Icons.save, 
-                            label: "Save Video", 
+                            label: "Export Crop", 
                             color: const Color(0xFFA5D6A7), // Pastel Green
-                            isEnabled: show.mediaFile.isNotEmpty || _selectedEffect != null,
-                            onTap: () => (_selectedEffect != null) ? _exportEffect() : _exportVideo()
+                            isEnabled: show.backgroundLayer.path != null,
+                            onTap: () => _exportVideo()
                           ),
                           // Full width transfer button? Or just another tile.
   
@@ -769,37 +885,34 @@ class _VideoTabState extends State<VideoTab> {
                      // 2.5 Playback Controls
                      if (show.mediaFile.isNotEmpty) ...[
   
-                        Row(
-                          children: [
-                             Expanded(
-                               child: Container(
-                                 decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8)),
-                                 child: Row(
-                                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                                   children: [
-                                     IconButton(
-                                       onPressed: () => player.playOrPause(),
-                                       icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
-                                       color: Colors.white,
-                                       tooltip: _isPlaying ? "Pause" : "Play",
-                                     ),
-                                     IconButton(
-                                       onPressed: () async {
-                                         await player.seek(Duration.zero);
-                                         await player.pause();
-                                       },
-                                       icon: const Icon(Icons.stop),
-                                       color: Colors.redAccent,
-                                       tooltip: "Stop",
-                                     ),
-                                   ],
-                                 ),
+                        GlassContainer(
+                           padding: EdgeInsets.zero,
+                           borderRadius: BorderRadius.circular(50),
+                           child: Row(
+                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                             children: [
+                               IconButton(
+                                 onPressed: () => player.playOrPause(),
+                                 icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
+                                 color: Colors.white,
+                                 tooltip: _isPlaying ? "Pause" : "Play",
                                ),
-                             )
-                          ],
-                        ),
+                               IconButton(
+                                 onPressed: () async {
+                                   await _bgPlayer.seek(Duration.zero);
+                                   await _fgPlayer.seek(Duration.zero);
+                                   await _bgPlayer.pause();
+                                   await _fgPlayer.pause();
+                                 },
+                                 icon: const Icon(Icons.stop),
+                                 color: Colors.redAccent,
+                                 tooltip: "Stop",
+                               ),
+                             ],
+                           ),
+                        )
+                      ],
                         const SizedBox(height: 24),
-                     ],
   
   
                      // 3. Edit Modes (Simplifed)
@@ -816,7 +929,7 @@ class _VideoTabState extends State<VideoTab> {
                           child: Column(
                              crossAxisAlignment: CrossAxisAlignment.start,
                              children: [
-                                Text("MATRIX INTERSECTION", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 10, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                                Text("MATRIX INTERSECTION", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 10, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                                 const SizedBox(height: 8),
                                 if (_currentIntersection != null) ...[
                                    _buildInfoRow("X Start", "$_displayX"),
@@ -836,7 +949,7 @@ class _VideoTabState extends State<VideoTab> {
                               const Spacer(),
                               Switch(
                                 value: _lockAspectRatio, 
-                                activeColor:  const Color(0xFF90CAF9),
+                                activeThumbColor:  const Color(0xFF90CAF9),
                                 onChanged: (v) => setState(() => _lockAspectRatio = v)
                               ),
                            ],
@@ -853,7 +966,10 @@ class _VideoTabState extends State<VideoTab> {
                         Column(
                              crossAxisAlignment: CrossAxisAlignment.start,
                              children: [
-                                ..._effectParams.keys.map((key) {
+                                 ...activeParams.keys.map((key) {
+                                    // Guard: ensure key exists (redundant if iterating keys, but safe)
+                                    if (!activeParams.containsKey(key)) return const SizedBox.shrink();
+
                                     final def = EffectService.effects.firstWhere((e) => e.type == _selectedEffect);
                                     double min = def.minParams[key] ?? 0.0;
                                     double max = def.maxParams[key] ?? 1.0;
@@ -861,14 +977,21 @@ class _VideoTabState extends State<VideoTab> {
                                     return Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
-                                        Text("$key: ${_effectParams[key]!.toStringAsFixed(2)}", style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                                        Text("$key: ${(activeParams[key] ?? min).toStringAsFixed(2)}", style: const TextStyle(color: Colors.white70, fontSize: 12)),
                                         Slider(
-                                          value: _effectParams[key]!,
+                                          value: activeParams[key] ?? min,
                                           min: min,
                                           max: max,
                                           activeColor: const Color(0xFF90CAF9),
                                           inactiveColor: Colors.white12,
-                                          onChanged: (v) => setState(() => _effectParams[key] = v),
+                                          onChanged: (v) {
+                                             final newParams = Map<String, double>.from(activeParams);
+                                             newParams[key] = v;
+                                             context.read<ShowState>().updateLayer(
+                                                isForeground: _isForegroundSelected, 
+                                                params: newParams
+                                             );
+                                          },
                                         ),
                                       ],
                                     );
@@ -883,7 +1006,7 @@ class _VideoTabState extends State<VideoTab> {
                              ],
                            ),
                      ] else ...[
-                         Text("EFFECTS LIBRARY", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                         Text("EFFECTS LIBRARY", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                          const SizedBox(height: 12),
                          // Removed Expanded and added shrinkWrap
                          ListView(
@@ -893,16 +1016,30 @@ class _VideoTabState extends State<VideoTab> {
                                return Container(
                                  margin: const EdgeInsets.only(bottom: 8),
                                  decoration: BoxDecoration(
-                                   color: Colors.white.withOpacity(0.05),
+                                   color: Colors.white.withValues(alpha: 0.05),
                                    borderRadius: BorderRadius.circular(8),
                                  ),
                                  child: ListTile(
                                    leading: Icon(Icons.auto_fix_high, color: Colors.white70),
                                    title: Text(e.name.toUpperCase(), style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
                                   onTap: () {
+                                    // Apply Effect to Active Layer
+                                    context.read<ShowState>().updateLayer(
+                                       isForeground: _isForegroundSelected,
+                                       type: LayerType.effect,
+                                       effect: e,
+                                       opacity: 1.0, 
+                                       params: EffectService.effects.firstWhere((eff) => eff.type == e).defaultParams
+                                    );
+                                    
+                                    // Also set local state for editing?
+                                    // Actually, we should probably read from ShowState
+                                    // But for now keeping local override logic or removing it? 
+                                    // Let's rely on ShowState.
+                                    
                                     setState(() {
                                       _selectedEffect = e;
-                                      _loadEffectDefaults(e);
+                                      // _loadEffectDefaults(e); // Handled by updateLayer defaultParams
                                     });
                                   },
                                 ),
@@ -913,8 +1050,10 @@ class _VideoTabState extends State<VideoTab> {
                    ],
 
                   ],
+
                 ),
               ),
+            ),
             ),
           ],
         );
@@ -926,27 +1065,115 @@ class _VideoTabState extends State<VideoTab> {
 
   // MARK: - Intersection Logic
   void _calculateIntersection() {
-     final show = context.read<ShowState>().currentShow;
-     final width = player.state.width;
-     final height = player.state.height;
-     
-     if (show == null || show.fixtures.isEmpty || width == null || height == null) {
-        if (_currentIntersection != null) {
+    final show = context.read<ShowState>().currentShow;
+    if (show == null) return;
+    
+    final activeLayer = _isForegroundSelected ? show.foregroundLayer : show.backgroundLayer;
+    final transform = activeLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
+
+    final width = _bgPlayer.state.width;
+    final height = _bgPlayer.state.height;
+    
+    if (show.fixtures.isEmpty || width == null || height == null) {
+       if (_currentIntersection != null) {
+         setState(() {
+            _currentIntersection = null;
+            _intersectW = 0;
+            _intersectH = 0;
+            _displayX = 0;
+            _displayY = 0;
+         });
+       }
+       return;
+    }
+
+    const double gridSize = 10.0;
+    
+    // 1. Matrix Bounds (Logic Space)
+    double minMx = double.infinity, maxMx = double.negativeInfinity;
+    double minMy = double.infinity, maxMy = double.negativeInfinity;
+    
+    for (var f in show.fixtures) {
+       for (var p in f.pixels) {
+          double px = p.x * gridSize;
+          double py = p.y * gridSize;
+          if (px < minMx) minMx = px;
+          if (px > maxMx) maxMx = px;
+          if (py < minMy) minMy = py;
+          if (py > maxMy) maxMy = py;
+       }
+    }
+    maxMx += gridSize; 
+    maxMy += gridSize;
+    
+    double matW = maxMx - minMx;
+    double matH = maxMy - minMy;
+    
+    // 2. Video Bounds (Logic Space) relative to Matrix Center
+    // Matrix is centered at (0,0) visually.
+    // Video is transformed relative to (0,0).
+    
+    // Use the 'transform' variable defined earlier
+    // final t = show.mediaTransform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
+    
+    // Video Original Size
+    final vidW = width.toDouble();
+    final vidH = height.toDouble();
+    
+    // Scaled Size
+    final scaledW = vidW * transform.scaleX;
+    final scaledH = vidH * transform.scaleY;
+    
+    // TopLeft of Video relative to Center (0,0)
+    // Center is at t.translateX, t.translateY
+    final vidLeft = transform.translateX - (scaledW / 2);
+    final vidTop = transform.translateY - (scaledH / 2);
+    
+    Rect videoRect = Rect.fromLTWH(vidLeft, vidTop, scaledW, scaledH);
+    
+    // Matrix Rect relative to Center (0,0)
+    // Matrix Center is (minMx + maxMx)/2, (minMy + maxMy)/2
+    // But we draw Matrix so that it fits in the container centered.
+    // Matrix spans from -matW/2 to matW/2 relative to center.
+    
+    Rect matrixRect = Rect.fromCenter(center: Offset.zero, width: matW, height: matH);
+    
+    // 3. Intersect
+    Rect intersect = matrixRect.intersect(videoRect);
+    
+    if (intersect.width > 0 && intersect.height > 0) {
+       // Calculate Grid Resolution
+       int w = (intersect.width / gridSize).round();
+       int h = (intersect.height / gridSize).round();
+       
+       // Calculate Display Coordinates (Bottom-Left Origin)
+       // X Start: Distance from Left Edge
+       double matLeft = matrixRect.left;
+       double xDist = intersect.left - matLeft;
+       int dX = (xDist / gridSize).round();
+
+       // Y Start: Distance from Bottom Edge (Flutter Y grows down)
+       // Matrix Bottom (Max Y) - Intersect Bottom (Max Y of intersection)
+       double matBottom = matrixRect.bottom;
+       double yDist = matBottom - intersect.bottom; 
+       int dY = (yDist / gridSize).round();
+
+       setState(() {
+          _currentIntersection = intersect;
+          _intersectW = w;
+          _intersectH = h;
+          _displayX = dX;
+          _displayY = dY;
+       });
+    } else {
+       if (_currentIntersection != null) {
           setState(() {
-             _currentIntersection = null;
+            _currentIntersection = null;
              _intersectW = 0;
              _intersectH = 0;
              _displayX = 0;
              _displayY = 0;
           });
-        }
-        return;
-     }
-
-     const double gridSize = 10.0;
-     
-     // 1. Matrix Bounds (Logic Space)
-     double minMx = double.infinity, maxMx = double.negativeInfinity;
      double minMy = double.infinity, maxMy = double.negativeInfinity;
      
      for (var f in show.fixtures) {
@@ -969,7 +1196,7 @@ class _VideoTabState extends State<VideoTab> {
      // Matrix is centered at (0,0) visually.
      // Video is transformed relative to (0,0).
      
-     final t = show.mediaTransform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
+     final t = show.backgroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
      
      // Video Original Size
      final vidW = width.toDouble();
@@ -1052,10 +1279,13 @@ class _VideoTabState extends State<VideoTab> {
   void _loadEffectDefaults(EffectType type) {
      try {
        final def = EffectService.effects.firstWhere((e) => e.type == type);
+       // Update ShowState directly
+       context.read<ShowState>().updateLayer(
+          isForeground: _isForegroundSelected, 
+          params: def.defaultParams
+       );
        setState(() {
-          _effectParams = Map.from(def.defaultParams);
           _isPlaying = true;
-          // if (player.state.playing) player.pause(); // Optional: pause video to focus on effect?
        });
      } catch (e) {
        debugPrint("Error loading defaults for $type: $e");
@@ -1063,50 +1293,21 @@ class _VideoTabState extends State<VideoTab> {
   }
 
   Widget _buildModernButton({required IconData icon, required String label, required Color color, required VoidCallback? onTap, bool isEnabled = true}) {
-      return Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: isEnabled ? onTap : null,
-          borderRadius: BorderRadius.circular(12),
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: isEnabled ? LinearGradient(colors: [color.withOpacity(0.8), color.withOpacity(0.5)], begin: Alignment.topLeft, end: Alignment.bottomRight) 
-                                :  const LinearGradient(colors: [Colors.white10, Colors.white10]),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: isEnabled ? color.withOpacity(0.6) : Colors.white10),
-              boxShadow: isEnabled ? [BoxShadow(color: color.withOpacity(0.3), blurRadius: 8, offset: const Offset(0, 4))] : [],
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, color: isEnabled ? Colors.white : Colors.white38, size: 28),
-                const SizedBox(height: 8),
-                Text(label, style: TextStyle(color: isEnabled ? Colors.white : Colors.white38, fontSize: 12, fontWeight: FontWeight.bold)),
-              ],
-            ),
-          ),
+      return FilledButton(
+        onPressed: isEnabled ? onTap : null,
+        style: FilledButton.styleFrom(
+          backgroundColor: isEnabled ? color.withValues(alpha: 0.8) : Colors.white10,
+          foregroundColor: isEnabled ? Colors.white : Colors.white38,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          padding: EdgeInsets.zero,
         ),
-      );
-  }
-
-  Widget _buildToggle(IconData icon, String label, bool isActive, VoidCallback onTap) {
-      return Expanded(
-        child: GestureDetector(
-          onTap: onTap,
-          child: Container(
-             padding: const EdgeInsets.symmetric(vertical: 12),
-             decoration: BoxDecoration(
-               color: isActive ? Colors.white : Colors.white10,
-               borderRadius: BorderRadius.circular(8),
-             ),
-             child: Column(
-               children: [
-                 Icon(icon, color: isActive ? Colors.black : Colors.white70, size: 20),
-                 const SizedBox(height: 4),
-                 Text(label, style: TextStyle(color: isActive ? Colors.black : Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
-               ],
-             ),
-          ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 28),
+            const SizedBox(height: 8),
+            Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+          ],
         ),
       );
   }

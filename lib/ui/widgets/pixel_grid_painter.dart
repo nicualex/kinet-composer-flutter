@@ -18,11 +18,11 @@ class PixelGridPainter extends CustomPainter {
     // or we just draw from 0,0 and let the parent widget scale/position us.
 
     final fixturePaint = Paint()
-      ..color = Colors.blue.withAlpha(100)
+      ..color = Colors.blue.withValues(alpha: 0.4)
       ..style = PaintingStyle.fill;
     
     final borderPaint = Paint()
-      ..color = Colors.green.withOpacity(0.5)
+      ..color = Colors.green.withValues(alpha: 0.5)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.0;
 

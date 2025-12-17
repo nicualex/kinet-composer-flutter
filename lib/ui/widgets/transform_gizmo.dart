@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import '../../models/show_manifest.dart';
+import '../../models/media_transform.dart';
 
 // Enum shared with Gizmo
 enum EditMode { zoom, crop }

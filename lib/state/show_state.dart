@@ -6,6 +6,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:archive/archive_io.dart'; 
 import 'package:path/path.dart' as p;
 import '../models/show_manifest.dart';
+import '../models/layer_config.dart';
+import '../models/media_transform.dart';
+import '../services/effect_service.dart';
 
 class ShowState extends ChangeNotifier {
   ShowManifest? _currentShow;
@@ -125,59 +128,74 @@ class ShowState extends ChangeNotifier {
      notifyListeners();
   }
 
+  void updateLayer({
+    required bool isForeground,
+    LayerType? type,
+    String? path,
+    EffectType? effect,
+    Map<String, double>? params,
+    double? opacity,
+
+    bool? isVisible,
+    MediaTransform? transform,
+  }) {
+    if (_currentShow == null) return;
+
+    final currentLayer = isForeground ? _currentShow!.foregroundLayer : _currentShow!.backgroundLayer;
+
+    final newLayer = currentLayer.copyWith(
+      type: type,
+      path: path,
+      effect: effect,
+      effectParams: params,
+      opacity: opacity,
+      isVisible: isVisible,
+      transform: transform,
+    );
+
+    // Sync legacy mediaFile if updating background video
+    String newMediaFile = _currentShow!.mediaFile;
+    if (!isForeground && path != null) {
+      newMediaFile = path;
+    }
+
+    _currentShow = ShowManifest(
+      version: _currentShow!.version,
+      name: _currentShow!.name,
+      mediaFile: newMediaFile,
+      fixtures: _currentShow!.fixtures,
+      settings: _currentShow!.settings,
+      backgroundLayer: isForeground ? _currentShow!.backgroundLayer : newLayer,
+      foregroundLayer: isForeground ? newLayer : _currentShow!.foregroundLayer,
+    );
+    _isModified = true;
+    notifyListeners();
+  }
+
   void updateName(String name) {
     if (_currentShow != null) {
       _currentShow = ShowManifest(
         version: _currentShow!.version,
         name: name,
         mediaFile: _currentShow!.mediaFile,
-        mediaTransform: _currentShow!.mediaTransform,
         fixtures: _currentShow!.fixtures,
         settings: _currentShow!.settings,
+        backgroundLayer: _currentShow!.backgroundLayer,
+        foregroundLayer: _currentShow!.foregroundLayer,
       );
       _isModified = true;
       notifyListeners();
     }
   }
 
+  // updateTransform is removed. Use updateLayer(transform: ...) instead.
+
+  // Legacy support or quick access for Background Video
   void updateMedia(String path) {
-    if (_currentShow != null) {
-      // Reset transform when loading new media
-      final defaultTransform = MediaTransform(
-        scaleX: 1.0, 
-        scaleY: 1.0, 
-        translateX: 0.0, 
-        translateY: 0.0, 
-        rotation: 0.0
-      );
-      
-      _currentShow = ShowManifest(
-        version: _currentShow!.version,
-        name: _currentShow!.name,
-        mediaFile: path,
-        mediaTransform: defaultTransform,
-        fixtures: _currentShow!.fixtures,
-        settings: _currentShow!.settings,
-      );
-      _isModified = true;
-      notifyListeners();
-    }
+     updateLayer(isForeground: false, type: LayerType.video, path: path);
   }
 
-  void updateTransform(MediaTransform? transform) {
-     if (_currentShow != null) {
-      _currentShow = ShowManifest(
-        version: _currentShow!.version,
-        name: _currentShow!.name,
-        mediaFile: _currentShow!.mediaFile,
-        mediaTransform: transform,
-        fixtures: _currentShow!.fixtures,
-        settings: _currentShow!.settings,
-      );
-      _isModified = true;
-      notifyListeners();
-    }
-  }
+
 
   void setMediaAndTransform(String mediaPath, MediaTransform? transform) {
     if (_currentShow != null) {
@@ -185,7 +203,6 @@ class ShowState extends ChangeNotifier {
         version: _currentShow!.version,
         name: _currentShow!.name,
         mediaFile: mediaPath,
-        mediaTransform: transform,
         fixtures: _currentShow!.fixtures,
         settings: _currentShow!.settings,
       );
@@ -218,7 +235,6 @@ class ShowState extends ChangeNotifier {
         version: _currentShow!.version,
         name: _currentShow!.name,
         mediaFile: _currentShow!.mediaFile,
-        mediaTransform: _currentShow!.mediaTransform,
         fixtures: [importedFixture], // Replace existing fixtures with the imported one
         settings: _currentShow!.settings,
       );
@@ -256,7 +272,6 @@ class ShowState extends ChangeNotifier {
       version: _currentShow!.version,
       name: _currentShow!.name,
       mediaFile: _currentShow!.mediaFile,
-      mediaTransform: _currentShow!.mediaTransform,
       fixtures: newFixtures,
       settings: _currentShow!.settings,
     );
@@ -278,33 +293,53 @@ class ShowState extends ChangeNotifier {
         // 1. Add Thumbnail
         encoder.addFile(thumbnail, 'thumbnail.png');
         
-        // 2. Add Media File
-        if (_currentShow!.mediaFile.isNotEmpty) {
-           final mediaPath = _currentShow!.mediaFile;
+        // 2. Add Media Files (Background)
+        if (_currentShow!.backgroundLayer.type == LayerType.video && 
+            _currentShow!.backgroundLayer.path != null && 
+            _currentShow!.backgroundLayer.path!.isNotEmpty) {
+           
+           final mediaPath = _currentShow!.backgroundLayer.path!;
            final mediaFile = File(mediaPath);
            if (await mediaFile.exists()) {
-              encoder.addFile(mediaFile, 'media${p.extension(mediaPath)}');
-              
-              // Update Manifest to point to relative path "media.ext"
-              // But we don't want to change the *current* state.
-              // So create a copy of manifest.
-              final exportManifest = ShowManifest(
-                version: _currentShow!.version,
-                name: _currentShow!.name,
-                mediaFile: 'media${p.extension(mediaPath)}', // Relative path in zip
-                mediaTransform: _currentShow!.mediaTransform,
-                fixtures: _currentShow!.fixtures,
-                settings: _currentShow!.settings
-              );
-              
-              // 3. Add Manifest
-              final jsonStr = jsonEncode(exportManifest.toJson());
-              // Save temp manifest
-              final manifestFile = File('${tempDir.path}/manifest.json');
-              await manifestFile.writeAsString(jsonStr);
-              encoder.addFile(manifestFile);
+              final ext = p.extension(mediaPath);
+              final filename = 'background$ext';
+              encoder.addFile(mediaFile, filename);
            }
         }
+
+        // 3. Add Media Files (Foreground)
+        if (_currentShow!.foregroundLayer.type == LayerType.video && 
+            _currentShow!.foregroundLayer.path != null && 
+            _currentShow!.foregroundLayer.path!.isNotEmpty) {
+           
+           final mediaPath = _currentShow!.foregroundLayer.path!;
+           final mediaFile = File(mediaPath);
+           if (await mediaFile.exists()) {
+              final ext = p.extension(mediaPath);
+              final filename = 'foreground$ext';
+              encoder.addFile(mediaFile, filename);
+           }
+        }
+        
+        // 4. Create Export Manifest (Updates paths to relative)
+        final exportManifest = ShowManifest(
+          version: _currentShow!.version,
+          name: _currentShow!.name,
+          mediaFile: _currentShow!.backgroundLayer.path != null ? 'background${p.extension(_currentShow!.backgroundLayer.path!)}' : '',
+          fixtures: _currentShow!.fixtures,
+          settings: _currentShow!.settings,
+          backgroundLayer: _currentShow!.backgroundLayer.copyWith(
+             path: _currentShow!.backgroundLayer.path != null ? 'background${p.extension(_currentShow!.backgroundLayer.path!)}' : null
+          ),
+          foregroundLayer: _currentShow!.foregroundLayer.copyWith(
+             path: _currentShow!.foregroundLayer.path != null ? 'foreground${p.extension(_currentShow!.foregroundLayer.path!)}' : null
+          ),
+        );
+        
+        final jsonStr = jsonEncode(exportManifest.toJson());
+        final manifestFile = File('${tempDir.path}/manifest.json');
+        await manifestFile.writeAsString(jsonStr);
+        encoder.addFile(manifestFile);
         
         encoder.close();
         return File(bundlePath);

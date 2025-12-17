@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:convert';
+// import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
@@ -19,6 +19,7 @@ import '../widgets/pixel_grid_painter.dart';
 import '../widgets/transform_gizmo.dart';
 import '../widgets/effect_renderer.dart';
 import '../widgets/transfer_dialog.dart';
+import '../widgets/glass_container.dart';
 
 // Enum removed, using from transform_gizmo.dart
 
@@ -66,8 +67,7 @@ class _ShowsTabState extends State<ShowsTab> {
   
   final GlobalKey _previewKey = GlobalKey(); // For Snapshot
   
-  // Debounce for fit
-  Timer? _fitDebounce;
+
 
   @override
   void initState() {
@@ -166,13 +166,15 @@ class _ShowsTabState extends State<ShowsTab> {
      
      WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        context.read<ShowState>().updateTransform(MediaTransform(
-           scaleX: scale,
-           scaleY: scale,
-           translateX: 0,
-           translateY: 0,
-           rotation: 0
-        ));
+        context.read<ShowState>().updateLayer(
+           isForeground: false, // Default to background
+           transform: MediaTransform(
+            scaleX: scale,
+            scaleY: scale,
+            translateX: 0,
+            translateY: 0,
+            rotation: 0
+         ));
         
         _calculateIntersection(); // Force UI update
         
@@ -365,23 +367,7 @@ class _ShowsTabState extends State<ShowsTab> {
      }
   }
 
-  Future<void> _showTransferDialog() async {
-     // 1. Capture Thumbnail
-     final thumb = await _captureThumbnail();
-     if (thumb == null) {
-       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Failed to capture thumbnail")));
-       return;
-     }
 
-     if (!mounted) return;
-     
-     // 2. Show Dialog
-     showDialog(
-       context: context,
-       barrierDismissible: false,
-       builder: (c) => TransferDialog(thumbnail: thumb),
-     );
-  }
 
   Future<void> _exportVideo() async {
     final show = context.read<ShowState>().currentShow;
@@ -422,7 +408,7 @@ class _ShowsTabState extends State<ShowsTab> {
     );
 
     try {
-      final baseT = show.mediaTransform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
+      final baseT = show.backgroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
       final t = baseT;
       
       final width = player.state.width;
@@ -510,9 +496,7 @@ class _ShowsTabState extends State<ShowsTab> {
         if (result.exitCode == 0) {
              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Video Exported Successfully!")));
              
-             if (outputPath != null) {
-                context.read<ShowState>().updateMedia(outputPath);
-             }
+             context.read<ShowState>().updateMedia(outputPath);
         } else {
              // Show Detailed Error Dialog
              showDialog(
@@ -592,7 +576,9 @@ class _ShowsTabState extends State<ShowsTab> {
     
     setState(() {
        // _isEditingCrop = false;
-       context.read<ShowState>().updateTransform(MediaTransform(
+       context.read<ShowState>().updateLayer(
+         isForeground: false,
+         transform: MediaTransform(
           scaleX: targetScaleX,
           scaleY: targetScaleY,
           translateX: 0,
@@ -618,7 +604,7 @@ class _ShowsTabState extends State<ShowsTab> {
 
         _syncPlayer(show.mediaFile);
 
-        final baseTransform = show.mediaTransform ??
+        final baseTransform = show.backgroundLayer.transform ??
             MediaTransform(
                 scaleX: 1.0,
                 scaleY: 1.0,
@@ -735,7 +721,7 @@ class _ShowsTabState extends State<ShowsTab> {
                                               lockAspect: _lockAspectRatio,
                                               onDoubleTap: _fitToMatrix,
                                               onUpdate: (newTransform) {
-                                                   showState.updateTransform(newTransform);
+                                                   showState.updateLayer(isForeground: false, transform: newTransform);
                                                    _calculateIntersection(); // Update UI info
                                               },
                                               child: Container(
@@ -754,7 +740,8 @@ class _ShowsTabState extends State<ShowsTab> {
                                               ),
                                             ),
                                         ),
-                                      )
+                                      ),
+                                    )
                                      else
                                       const Center(
                                         child: Text(
@@ -766,6 +753,7 @@ class _ShowsTabState extends State<ShowsTab> {
                                  ],
                                ),
                              ),
+                             ), // Close Container
                              ), // Close Transform
                            ); // Close Center
                         },
@@ -778,25 +766,21 @@ class _ShowsTabState extends State<ShowsTab> {
           ),
 
 
-            // NEW: Modern Sidebar
-            Container(
-              width: 320,
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E1E1E), // Dark charcoal
-                border: const Border(left: BorderSide(color: Colors.white12)),
-                boxShadow: [
-                   BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 10, offset: const Offset(-2, 0))
-                ]
-              ),
+            // Glass Sidebar
+            GlassContainer(
               padding: const EdgeInsets.all(20.0),
+              borderRadius: const BorderRadius.only(topLeft: Radius.circular(16), bottomLeft: Radius.circular(16)),
+              border: const Border(left: BorderSide(color: Colors.white12)),
+              child: SizedBox(
+                width: 320,
               child: SingleChildScrollView(
-                padding: const EdgeInsets.only(bottom: 150), // Prevent bottom overflow
+                padding: const EdgeInsets.all(20.0).copyWith(bottom: 170), // Prevent bottom overflow
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                      // 1. Header
-                     Text("COMPOSER", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                     Text("COMPOSER", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                      const SizedBox(height: 4),
                      
                      // Project Name & Status
@@ -955,7 +939,7 @@ class _ShowsTabState extends State<ShowsTab> {
                           child: Column(
                              crossAxisAlignment: CrossAxisAlignment.start,
                              children: [
-                                Text("MATRIX INTERSECTION", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 10, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                                Text("MATRIX INTERSECTION", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 10, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                                 const SizedBox(height: 8),
                                 if (_currentIntersection != null) ...[
                                    _buildInfoRow("X Start", "$_displayX"),
@@ -975,7 +959,7 @@ class _ShowsTabState extends State<ShowsTab> {
                               const Spacer(),
                               Switch(
                                 value: _lockAspectRatio, 
-                                activeColor:  const Color(0xFF90CAF9),
+                                activeThumbColor:  const Color(0xFF90CAF9),
                                 onChanged: (v) => setState(() => _lockAspectRatio = v)
                               ),
                            ],
@@ -1022,7 +1006,7 @@ class _ShowsTabState extends State<ShowsTab> {
                              ],
                            ),
                      ] else ...[
-                         Text("EFFECTS LIBRARY", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                         Text("EFFECTS LIBRARY", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                          const SizedBox(height: 12),
                          // Removed Expanded and added shrinkWrap
                          ListView(
@@ -1032,7 +1016,7 @@ class _ShowsTabState extends State<ShowsTab> {
                                return Container(
                                  margin: const EdgeInsets.only(bottom: 8),
                                  decoration: BoxDecoration(
-                                   color: Colors.white.withOpacity(0.05),
+                                   color: Colors.white.withValues(alpha: 0.05),
                                    borderRadius: BorderRadius.circular(8),
                                  ),
                                  child: ListTile(
@@ -1055,8 +1039,9 @@ class _ShowsTabState extends State<ShowsTab> {
                 ),
               ),
             ),
-          ],
-        ));
+          ),
+        ],
+      ));
       },
     );
   }
@@ -1108,7 +1093,7 @@ class _ShowsTabState extends State<ShowsTab> {
      // Matrix is centered at (0,0) visually.
      // Video is transformed relative to (0,0).
      
-     final t = show.mediaTransform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
+     final t = show.backgroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
      
      // Video Original Size
      final vidW = width.toDouble();
@@ -1202,28 +1187,21 @@ class _ShowsTabState extends State<ShowsTab> {
   }
 
   Widget _buildModernButton({required IconData icon, required String label, required Color color, required VoidCallback? onTap, bool isEnabled = true}) {
-      return Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: isEnabled ? onTap : null,
-          borderRadius: BorderRadius.circular(12),
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: isEnabled ? LinearGradient(colors: [color.withOpacity(0.8), color.withOpacity(0.5)], begin: Alignment.topLeft, end: Alignment.bottomRight) 
-                                :  const LinearGradient(colors: [Colors.white10, Colors.white10]),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: isEnabled ? color.withOpacity(0.6) : Colors.white10),
-              boxShadow: isEnabled ? [BoxShadow(color: color.withOpacity(0.3), blurRadius: 8, offset: const Offset(0, 4))] : [],
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, color: isEnabled ? Colors.white : Colors.white38, size: 28),
-                const SizedBox(height: 8),
-                Text(label, style: TextStyle(color: isEnabled ? Colors.white : Colors.white38, fontSize: 12, fontWeight: FontWeight.bold)),
-              ],
-            ),
-          ),
+      return FilledButton(
+        onPressed: isEnabled ? onTap : null,
+        style: FilledButton.styleFrom(
+          backgroundColor: isEnabled ? color.withValues(alpha: 0.8) : Colors.white10,
+          foregroundColor: isEnabled ? Colors.white : Colors.white38,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          padding: EdgeInsets.zero,
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 28),
+            const SizedBox(height: 8),
+            Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold), textAlign: TextAlign.center),
+          ],
         ),
       );
   }
@@ -1270,7 +1248,7 @@ class _ShowsTabState extends State<ShowsTab> {
 
     try {
         // 3. Render
-        final success = await _performFfmpegRender(show.mediaFile, videoPath, show.mediaTransform, _intersectW, _intersectH, _currentIntersection!);
+        final success = await _performFfmpegRender(show.mediaFile, videoPath, show.backgroundLayer.transform, _intersectW, _intersectH, _currentIntersection!);
         
         if (!mounted) return;
         Navigator.pop(context); // Close loader

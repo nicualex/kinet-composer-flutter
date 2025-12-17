@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:kinet_composer/ui/tabs/project_tab.dart';
 import 'package:kinet_composer/ui/tabs/setup_tab.dart';
+import '../widgets/glass_container.dart';
 
 class UtilitiesTab extends StatefulWidget {
   const UtilitiesTab({super.key});
@@ -28,20 +29,16 @@ class _UtilitiesTabState extends State<UtilitiesTab> {
         ),
 
         // Sidebar Navigation
-        Container(
-          width: 320,
-          decoration: BoxDecoration(
-            color: const Color(0xFF1E1E1E),
-            border: const Border(left: BorderSide(color: Colors.white12)),
-            boxShadow: [
-               BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 10, offset: const Offset(-2, 0))
-            ]
-          ),
+        GlassContainer(
           padding: const EdgeInsets.all(20.0),
-          child: Column(
+          borderRadius: const BorderRadius.only(topLeft: Radius.circular(16), bottomLeft: Radius.circular(16)),
+          border: const Border(left: BorderSide(color: Colors.white12)),
+          child: SizedBox(
+            width: 320,
+            child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-               Text("UTILITIES", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+               Text("UTILITIES", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                const SizedBox(height: 20),
 
                // Navigation Buttons
@@ -60,6 +57,7 @@ class _UtilitiesTabState extends State<UtilitiesTab> {
                ),
             ],
           ),
+          ),
         ),
       ],
     );
@@ -74,12 +72,13 @@ class _UtilitiesTabState extends State<UtilitiesTab> {
         child: InkWell(
           onTap: () => setState(() => _selectedIndex = index),
           borderRadius: BorderRadius.circular(12),
-          child: Container(
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
-              color: isSelected ? color.withOpacity(0.1) : Colors.white.withOpacity(0.05),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: isSelected ? color.withOpacity(0.5) : Colors.white12),
+              color: isSelected ? color.withValues(alpha: 0.1) : Colors.white.withValues(alpha: 0.0),
+              borderRadius: BorderRadius.circular(50), // Fully rounded
+              border: Border.all(color: isSelected ? color.withValues(alpha: 0.5) : Colors.transparent),
             ),
             child: Row(
               children: [
@@ -91,7 +90,7 @@ class _UtilitiesTabState extends State<UtilitiesTab> {
                     children: [
                       Text(label, style: TextStyle(color: isSelected ? Colors.white : Colors.white70, fontSize: 14, fontWeight: FontWeight.bold)),
                       const SizedBox(height: 4),
-                      Text(description, style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 11)),
+                      Text(description, style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 11)),
                     ],
                   ),
                 ),

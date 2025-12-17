@@ -73,7 +73,7 @@ class EffectService {
         // Ensure scale is at least somewhat visible
         // scale=1.0 means 1 full rainbow cycle across width
         
-        final freq = "((X/W)*2*PI*${scale} + T*${speed})";
+        final freq = "((X/W)*2*PI*$scale + T*$speed)";
         
         return "color=c=black:s=1920x1080,geq="
                "r='127.5+127.5*sin($freq)':"
@@ -118,26 +118,6 @@ class _RainbowPainter extends CustomPainter {
     // Let's rely on standard R-G-B-R gradient stops.
     // And translate it.
     
-    final double offset = -(time * speed / (2 * pi)) % 1.0; 
-    // Wait, speed in FFmpeg is inside Sine (rads).
-    // So if T=1, Speed=1 -> +1 Radian.
-    // 1 Radian is ~1/6th of a cycle.
-    // So offset should be speed / (2*PI).
-    
-    // Actually, let's just tune it visually.
-    final double visualOffset = -(time * speed * 0.16) % 1.0; // Approximation
-    
-    // Scale:
-    // If scale=1.0, we want 1 cycle.
-    // LinearGradient 0->1 covers the Rect.
-    // If we want multiple cycles, we need to map 0->1 to 0->1/scale in screen space?
-    // Uses tileMode.
-    
-    // Create shader for a Rect that is 'width / scale' wide?
-    // No, createShader maps the 0-1 stops to the rect provided.
-    // So if we provide a rect of width/scale, and draw it with repeat?
-    // But we need to fill 'width'.
-    
     // Strategy: Create shader on a virtual rect of width/scale.
     // Then apply a transform to the shader?
     
@@ -158,7 +138,7 @@ class _RainbowPainter extends CustomPainter {
     // 2*PI Radians = 1 cycleWidth.
     // shiftPixels = (time * speed / (2*PI)) * cycleWidth.
     
-    final double shiftPixels = (time * speed / (2 * pi)) * cycleWidth;
+
     
     // Scale transform? 
     // Easier to just define the rect for createShader?
@@ -166,12 +146,7 @@ class _RainbowPainter extends CustomPainter {
     // and TileMode.repeated, it will fill the whole paint area?
     // Yes.
     
-    final Matrix4 transform = Matrix4.identity()
-      ..translate(-shiftPixels, 0.0);
-      
-    final Shader shader = gradient.createShader(
-      Rect.fromLTWH(0, 0, cycleWidth, size.height), 
-    );
+
     
     // Apply matrix to shader?
     // LinearGradient has a 'transform' property!
@@ -203,16 +178,14 @@ class _RainbowPainter extends CustomPainter {
     // start = -1.0 - phase
     // end = start + range
     
-    double phase = (time * speed / (2 * pi)); // 0..1 per cycle
-    double range = 2.0; // Default
-    if (scale != 0) range = 2.0 / scale;
+
     
     // We want to shift LEFT (negative) as time increases to match "wave moving right"?
     // sin(x - t) moves right? sin(x + t) moves left.
     // Our FFmpeg is sin(x + t). Moves LEFT (content flows left).
     // So phase should be subtracted.
     
-    double startAlign = -1.0 - (phase * range); 
+    // double startAlign = -1.0 - (phase * range); 
     // Wait, phase is "percent of a cycle". 
     // One cycle = 'range' in alignment units.
     
@@ -277,25 +250,10 @@ class _NoisePainter extends CustomPainter {
 
     // Optimization: Draw coarse noise
     final Paint paint = Paint();
-    final Random rng = Random(); // New random every frame
-    
-    // Draw a grid of random blocks
-    // Block size depends on resolution?
-    // Let's do 4x4 pixel blocks for performance/aesthetic of "low res static"
-    double blockSize = 4.0;
-    
-    int cols = (size.width / blockSize).ceil();
-    int rows = (size.height / blockSize).ceil();
-    
-    // Probability of a pixel being "lit" or "colored"?
-    // FFmpeg noise is "random value".
-    // Let's just draw random rects covering the screen.
-    
-    // Note: Creating thousands of draw calls is heavy in Flutter for 60fps?
-    // Better: create an image? Too slow to generate.
+    const double blockSize = 2.0;
+
     // Better: Draw points? `canvas.drawPoints`.
     
-    List<Offset> points = [];
     paint.color = Colors.white; // Or random gray?
     paint.strokeWidth = blockSize;
     paint.strokeCap = StrokeCap.square;

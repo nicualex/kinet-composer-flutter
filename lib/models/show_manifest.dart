@@ -1,3 +1,6 @@
+import 'layer_config.dart';
+import 'media_transform.dart';
+export 'media_transform.dart';
 
 // Mirroring src/shared/types.ts
 
@@ -129,110 +132,69 @@ class PlaybackSettings {
   }
 }
 
-class CropInfo {
-  final double x;
-  final double y;
-  final double width;
-  final double height;
 
-  CropInfo({
-    required this.x,
-    required this.y,
-    required this.width,
-    required this.height,
-  });
 
-  factory CropInfo.fromJson(Map<String, dynamic> json) {
-    return CropInfo(
-      x: (json['x'] as num).toDouble(),
-      y: (json['y'] as num).toDouble(),
-      width: (json['width'] as num).toDouble(),
-      height: (json['height'] as num).toDouble(),
-    );
-  }
-
-  Map<String, dynamic> toJson() {
-    return {
-      'x': x,
-      'y': y,
-      'width': width,
-      'height': height,
-    };
-  }
-}
-
-class MediaTransform {
-  final double scaleX;
-  final double scaleY;
-  final double translateX;
-  final double translateY;
-  final double rotation;
-  final CropInfo? crop;
-
-  MediaTransform({
-    required this.scaleX,
-    required this.scaleY,
-    required this.translateX,
-    required this.translateY,
-    required this.rotation,
-    this.crop,
-  });
-
-  factory MediaTransform.fromJson(Map<String, dynamic> json) {
-    return MediaTransform(
-      scaleX: (json['scaleX'] as num).toDouble(),
-      scaleY: (json['scaleY'] as num).toDouble(),
-      translateX: (json['translateX'] as num).toDouble(),
-      translateY: (json['translateY'] as num).toDouble(),
-      rotation: (json['rotation'] as num).toDouble(),
-      crop: json['crop'] != null
-          ? CropInfo.fromJson(json['crop'] as Map<String, dynamic>)
-          : null,
-    );
-  }
-
-  Map<String, dynamic> toJson() {
-    return {
-      'scaleX': scaleX,
-      'scaleY': scaleY,
-      'translateX': translateX,
-      'translateY': translateY,
-      'rotation': rotation,
-      'crop': crop?.toJson(),
-    };
-  }
-}
-
+// Mirroring src/shared/types.ts
 class ShowManifest {
   final int version;
   final String name;
-  final String mediaFile; // Relative path
-  final MediaTransform? mediaTransform;
+  final String mediaFile; // Relative path (Legacy/Global reference)
   final List<Fixture> fixtures;
   final PlaybackSettings settings;
+  final LayerConfig backgroundLayer;
+  final LayerConfig foregroundLayer;
 
   ShowManifest({
     required this.version,
     required this.name,
     required this.mediaFile,
-    this.mediaTransform,
     required this.fixtures,
     required this.settings,
+    this.backgroundLayer = const LayerConfig(),
+    this.foregroundLayer = const LayerConfig(),
   });
 
   factory ShowManifest.fromJson(Map<String, dynamic> json) {
+    // Migration Logic:
+    
+    // 1. Recover Legacy Transform
+    MediaTransform? legacyTransform;
+    if (json['mediaTransform'] != null) {
+       legacyTransform = MediaTransform.fromJson(json['mediaTransform'] as Map<String, dynamic>);
+    }
+
+    // 2. Recover Legacy Background Layer
+    LayerConfig bgLayer;
+    if (json['backgroundLayer'] != null) {
+      bgLayer = LayerConfig.fromJson(json['backgroundLayer'] as Map<String, dynamic>);
+    } else if (json['mediaFile'] != null && (json['mediaFile'] as String).isNotEmpty) {
+      // Legacy Migration
+      bgLayer = LayerConfig(
+        type: LayerType.video,
+        path: json['mediaFile'] as String,
+        opacity: 1.0,
+      );
+    } else {
+      bgLayer = const LayerConfig();
+    }
+    
+    // 3. Apply Legacy Transform iff layer has none
+    if (bgLayer.transform == null && legacyTransform != null) {
+       bgLayer = bgLayer.copyWith(transform: legacyTransform);
+    }
+
     return ShowManifest(
       version: json['version'] as int,
       name: json['name'] as String,
-      mediaFile: json['mediaFile'] as String,
-      mediaTransform: json['mediaTransform'] != null
-          ? MediaTransform.fromJson(
-              json['mediaTransform'] as Map<String, dynamic>)
-          : null,
+      mediaFile: json['mediaFile'] as String? ?? '', // Keep for now or empty?
       fixtures: (json['fixtures'] as List<dynamic>)
           .map((e) => Fixture.fromJson(e as Map<String, dynamic>))
           .toList(),
       settings: PlaybackSettings.fromJson(json['settings'] as Map<String, dynamic>),
+      backgroundLayer: bgLayer,
+      foregroundLayer: json['foregroundLayer'] != null
+          ? LayerConfig.fromJson(json['foregroundLayer'] as Map<String, dynamic>)
+          : const LayerConfig(),
     );
   }
 
@@ -241,9 +203,11 @@ class ShowManifest {
       'version': version,
       'name': name,
       'mediaFile': mediaFile,
-      'mediaTransform': mediaTransform?.toJson(),
       'fixtures': fixtures.map((e) => e.toJson()).toList(),
       'settings': settings.toJson(),
+      'backgroundLayer': backgroundLayer.toJson(),
+      'foregroundLayer': foregroundLayer.toJson(),
     };
   }
 }
+

@@ -31,20 +31,26 @@ class KinetComposerApp extends StatelessWidget {
             brightness: Brightness.dark,
             secondary: Colors.cyanAccent,
             surface: const Color(0x0DFFFFFF), // Very transparent white
-            background: Colors.transparent,
           ),
           appBarTheme: const AppBarTheme(
              backgroundColor: Colors.transparent,
              elevation: 0,
           ),
-          // cardTheme: CardTheme(
-          //   color: Colors.white.withOpacity(0.05), // Glassy card
-          //   elevation: 0,
-          //   shape: RoundedRectangleBorder(
-          //      borderRadius: BorderRadius.circular(16),
-          //      side: BorderSide(color: Colors.white.withOpacity(0.1))
-          //   )
-          // ),
+          filledButtonTheme: FilledButtonThemeData(
+            style: FilledButton.styleFrom(
+              shape: const StadiumBorder(),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            ),
+          ),
+          inputDecorationTheme: InputDecorationTheme(
+            filled: true,
+            fillColor: Colors.white.withValues(alpha: 0.05),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: BorderSide.none,
+            ),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          ),
         ),
         home: const HomeScreen(),
       ),
