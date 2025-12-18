@@ -7,11 +7,13 @@ import 'effect_renderer.dart';
 class LayerRenderer extends StatelessWidget {
   final LayerConfig layer;
   final VideoController? controller;
+  final bool isPlaying;
 
   const LayerRenderer({
     super.key,
     required this.layer,
     this.controller,
+    this.isPlaying = true,
   });
 
   @override
@@ -34,6 +36,7 @@ class LayerRenderer extends StatelessWidget {
           content = EffectRenderer(
             type: layer.effect!,
             params: layer.effectParams,
+            isPlaying: isPlaying,
           );
         } else {
           content = const SizedBox.shrink();

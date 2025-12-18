@@ -142,6 +142,7 @@ class ShowManifest {
   final List<Fixture> fixtures;
   final PlaybackSettings settings;
   final LayerConfig backgroundLayer;
+  final LayerConfig middleLayer;
   final LayerConfig foregroundLayer;
 
   ShowManifest({
@@ -151,6 +152,7 @@ class ShowManifest {
     required this.fixtures,
     required this.settings,
     this.backgroundLayer = const LayerConfig(),
+    this.middleLayer = const LayerConfig(),
     this.foregroundLayer = const LayerConfig(),
   });
 
@@ -192,6 +194,9 @@ class ShowManifest {
           .toList(),
       settings: PlaybackSettings.fromJson(json['settings'] as Map<String, dynamic>),
       backgroundLayer: bgLayer,
+      middleLayer: json['middleLayer'] != null
+          ? LayerConfig.fromJson(json['middleLayer'] as Map<String, dynamic>)
+          : const LayerConfig(),
       foregroundLayer: json['foregroundLayer'] != null
           ? LayerConfig.fromJson(json['foregroundLayer'] as Map<String, dynamic>)
           : const LayerConfig(),
@@ -206,6 +211,7 @@ class ShowManifest {
       'fixtures': fixtures.map((e) => e.toJson()).toList(),
       'settings': settings.toJson(),
       'backgroundLayer': backgroundLayer.toJson(),
+      'middleLayer': middleLayer.toJson(),
       'foregroundLayer': foregroundLayer.toJson(),
     };
   }

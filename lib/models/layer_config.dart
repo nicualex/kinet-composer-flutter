@@ -2,6 +2,12 @@
 import 'media_transform.dart';
 import '../services/effect_service.dart';
 
+enum LayerTarget {
+  background,
+  middle,
+  foreground,
+}
+
 enum LayerType {
   none,
   video,
@@ -16,6 +22,7 @@ class LayerConfig {
   final double opacity;
   final bool isVisible;
   final MediaTransform? transform;
+  final bool lockAspectRatio;
 
   const LayerConfig({
     this.type = LayerType.none,
@@ -25,6 +32,7 @@ class LayerConfig {
     this.opacity = 1.0,
     this.isVisible = true,
     this.transform,
+    this.lockAspectRatio = true,
   });
 
   LayerConfig copyWith({
@@ -35,6 +43,7 @@ class LayerConfig {
     double? opacity,
     bool? isVisible,
     MediaTransform? transform,
+    bool? lockAspectRatio,
   }) {
     return LayerConfig(
       type: type ?? this.type,
@@ -44,6 +53,7 @@ class LayerConfig {
       opacity: opacity ?? this.opacity,
       isVisible: isVisible ?? this.isVisible,
       transform: transform ?? this.transform,
+      lockAspectRatio: lockAspectRatio ?? this.lockAspectRatio,
     );
   }
 
@@ -69,6 +79,7 @@ class LayerConfig {
       transform: json['transform'] != null
           ? MediaTransform.fromJson(json['transform'] as Map<String, dynamic>)
           : null,
+      lockAspectRatio: json['lockAspectRatio'] as bool? ?? true,
     );
   }
 
@@ -81,6 +92,7 @@ class LayerConfig {
       'opacity': opacity,
       'isVisible': isVisible,
       'transform': transform?.toJson(),
+      'lockAspectRatio': lockAspectRatio,
     };
   }
 }

@@ -15,6 +15,7 @@ class TransformGizmo extends StatefulWidget {
   final Function(MediaTransform) onUpdate;
   final VoidCallback? onDoubleTap; // NEW
   final Widget child;
+  final bool isSelected; // NEW
 
   const TransformGizmo({
     super.key,
@@ -25,7 +26,11 @@ class TransformGizmo extends StatefulWidget {
     this.isCropMode = false,
     this.lockAspect = true,
     this.editMode = EditMode.zoom, // Default
+    this.isSelected = true,
+    this.contentSize, // Optional Override
   });
+
+  final Size? contentSize;
 
   @override
   State<TransformGizmo> createState() => _TransformGizmoState();
@@ -154,113 +159,170 @@ class _TransformGizmoState extends State<TransformGizmo> {
       
       if (_initialTransform == null || _dragStart == null) return;
 
-      // Use Content Size for reference to ensure 1:1 feel
+      // 1. Get Intrinsic Size
       Size intrinsicSize = const Size(100, 100); 
       if (_contentKey.currentContext != null) {
           final box = _contentKey.currentContext!.findRenderObject() as RenderBox;
           intrinsicSize = box.size;
       }
-      debugPrint("Gizmo: PanUpdate. Intrinsic=$intrinsicSize, Transform=${_initialTransform?.scaleX}");
+
+      // 2. Calculate Logic Delta (Un-rotated, Un-scaled Screen Delta)
+      // We need accurate screen delta to logic delta conversion
+      double globalScale = _getGlobalScaleFactor();
+      if (globalScale == 0) globalScale = 1.0;
 
       Offset globalDelta = details.globalPosition - _dragStart!;
       
-      // Un-rotate
-      double rotRad = -_initialTransform!.rotation * pi / 180.0; // Negative to un-rotate
-      double dx_local = globalDelta.dx * cos(rotRad) - globalDelta.dy * sin(rotRad);
-      double dy_local = globalDelta.dx * sin(rotRad) + globalDelta.dy * cos(rotRad);
+      // Rotate Global Delta into Local Space to align with handle axes (Left/Right/Top/Bottom)
+      // Note: This rotation is purely to decompose Drag into Width/Height components relative to the object.
+      double rotRad = _initialTransform!.rotation * pi / 180.0; 
+      // We rotate by NEGATIVE angle to go from Global -> Local axis
+      double dx_local_axis = globalDelta.dx * cos(-rotRad) - globalDelta.dy * sin(-rotRad);
+      double dy_local_axis = globalDelta.dx * sin(-rotRad) + globalDelta.dy * cos(-rotRad);
 
-      // PROPORTIONALITY FIX (VERSION 3 - ROBUST GLOBAL SCALE):
-      // 1. Get Global Scale Factor (Screen Pixels per Logic Pixel)
-      double globalScale = _getGlobalScaleFactor();
-      if (globalScale == 0) globalScale = 1.0;
-      
-      // 2. Convert Screen Delta -> Logic Delta
-      // ScreenDelta / GlobalScale = LogicDelta
-      double dx_logic = dx_local / globalScale;
-      double dy_logic = dy_local / globalScale;
-      
-      // 3. Convert Logic Delta -> Scale Delta
-      // LogicDelta / IntrinsicSize = ScaleDelta
-      // (Since IntrinsicSize is the "100%" basis for scale)
+      // Convert Screen Pixels -> Logic Pixels
+      double logic_dx = dx_local_axis / globalScale;
+      double logic_dy = dy_local_axis / globalScale;
 
-      double currentSX = _initialTransform!.scaleX;
-      double currentSY = _initialTransform!.scaleY;
-      if (currentSX == 0) currentSX = 1;
-      if (currentSY == 0) currentSY = 1;
+      // 3. Determine Scale Changes based on Handle
+      // Scale = LogicSize / IntrinsicSize.
+      // DeltaScale = LogicDelta / IntrinsicSize.
       
-      Size visualSize = intrinsicSize;
+      double dSX = 0.0;
+      double dSY = 0.0;
 
-      double dScaleX = (dx_logic * currentSX.abs()) / visualSize.width; // Logic vs Logic
-      double dScaleY = (dy_logic * currentSY.abs()) / visualSize.height;
-      
-      // Wait, if visualSize.width is ALREADY scaled by scaleX in logic space?
-      // No, visualSize comes from RenderBox.size.
-      // If we are observing RenderBox of Child inside Transform...
-      // RenderBox sizes are generally unscaled by the Transform above them?
-      // Yes. So visualSize.width IS intrinsicSize.width (1920).
-      
-      // So dScaleX = dx_logic / visualSize.width.
-      // Wait, if I drag 100 logic pixels on a 1000px wide object, I want 10% change.
-      // So dScaleX = 0.1.
-      // So dScaleX = dx_logic / visualSize.width.
-      // Is that correct?
-      // Original Scale = 1.0. New Scale = 1.1.
-      // Visual Width goes 1000 -> 1100. Diff = 100. Correct.
-      
-      // What if Scale is 2.0?
-      // Visual Width is 2000.
-      // I drag 100 logic pixels.
-      // I expect visual width to go 2000 -> 2100.
-      // That is a 5% increase relative to 2000.
-      // But scale goes 2.0 -> 2.1?
-      // 2.1 * 1000 = 2100.
-      // So dScale IS always dx_logic / intrinsicWidth.
-      
-      dScaleX = dx_logic / visualSize.width;
-      dScaleY = dy_logic / visualSize.height;
-      
-      double newScaleX = _initialTransform!.scaleX;
-      double newScaleY = _initialTransform!.scaleY;
+      // X-Axis Logic
+      if (handleAlignment.x > 0) { // Right Handle
+         dSX = logic_dx / intrinsicSize.width;
+      } else if (handleAlignment.x < 0) { // Left Handle
+         dSX = -logic_dx / intrinsicSize.width; // Drag Left (-) = Increase Width (+)
+      }
 
+      // Y-Axis Logic
+      if (handleAlignment.y > 0) { // Bottom Handle
+         dSY = logic_dy / intrinsicSize.height;
+      } else if (handleAlignment.y < 0) { // Top Handle
+         dSY = -logic_dy / intrinsicSize.height; // Drag Up (-) = Increase Height (+)
+      }
+
+      double initialSX = _initialTransform!.scaleX;
+      double initialSY = _initialTransform!.scaleY;
+      
+      // Apply Aspect Ratio Lock
       if (widget.lockAspect) {
-        // Uniform scaling
-        double contribution = 0;
-        if (handleAlignment == Alignment.topRight) contribution = dScaleX - dScaleY;
-        if (handleAlignment == Alignment.topLeft) contribution = -dScaleX - dScaleY;
-        if (handleAlignment == Alignment.bottomRight) contribution = dScaleX + dScaleY;
-        if (handleAlignment == Alignment.bottomLeft) contribution = -dScaleX + dScaleY;
-        
-        newScaleX += contribution;
-        newScaleY += contribution; 
-      } else {
-        // Non-Uniform
-        if (handleAlignment == Alignment.topRight) {
-             newScaleX += dScaleX;
-             newScaleY -= dScaleY;
-        } else if (handleAlignment == Alignment.topLeft) {
-             newScaleX -= dScaleX;
-             newScaleY -= dScaleY;
-        } else if (handleAlignment == Alignment.bottomRight) {
-             newScaleX += dScaleX;
-             newScaleY += dScaleY;
-        } else if (handleAlignment == Alignment.bottomLeft) {
+         // To maximize intuitive feel, take the larger of the two inputs? 
+         // Or project onto diagonal?
+         // Simplest: Average or Max. Let's use the Component that is actually being pulled.
+         // If pulling Corner, typically we want the dominant drag direction.
+         // But for simplicity, let's say dS = (dSX + dSY) / 2? Or Max?
+         // Better: Use diagonal projection?
+         // Current simple approach used previously:
+         
+         double dS = 0;
+         if (handleAlignment.x != 0 && handleAlignment.y != 0) {
+             // Corner: Check which dimension is "free-est" or just sum?
+             // If I drag Right/Down, both positive.
+             // If Aspect Lock, modifying Scaler should trigger proportional ScaleY.
+             
+             // Let's rely on the handle sign.
+             double signX = handleAlignment.x;
+             double signY = handleAlignment.y;
+             
+             // dSX is already corrected for sign. 
+             // LogicDelta (10, 10) on BottomRight (1, 1) -> dSX=+, dSY=+
+             // LogicDelta (10, 10) on TopLeft (-1, -1) -> dSX=-, dSY=- (Drag Right/Down shrinks)
+             
+             // If locked: dSX should roughly equal dSY * Aspect?
+             // Let's just take the average magnitude change?
+             // Or better, just apply dSX to both? 
+             
+             // User complaint: "Feels like I move mouse more than outline".
+             // This suggests scaling factor is too small.
+             // If I drag 100px, I expect edge to move 100px.
+             // Edge position = Center + (Scale * 0.5 * Width).
+             // Delta Edge = Delta Scale * 0.5 * Width.
+             // We want Delta Edge = Drag Delta.
+             // Drag Delta = Delta Scale * 0.5 * Width.
+             // Delta Scale = Drag Delta / (0.5 * Width).
+             // Delta Scale = 2 * Drag Delta / Width.
+             
+             // MY PREVIOUS FORMULA: dScale = Delta / Width.
+             // This is off by factor of 2! 
+             // Because Pivot is Center, moving one edge 10px grows width by 20px (if symmetric) 
+             // OR grows width by 10px but center shifts 5px.
+             
+             // IF ANCHORED SCALING (Corner Fixed):
+             // Width grows by 10px.
+             // So dScale = 10 / Width.
+             // This matches my formula. 
+             // BUT, does the visual edge move 10px? 
+             // Visual Edge = Center + 0.5 * Scale * Width.
+             // If I am compensating center shift...
+             // New Edge = (Center + Shift) + 0.5 * (Scale + dS) * Width.
+             
+             dS = (dSX + dSY); // Basic combination
+             
+             // Check polarity match (prevent fighting)
+             if (dSX.sign != dSY.sign && dSX != 0 && dSY != 0) {
+                 // Dragging perpendicular to diagonal? Ignore?
+                 dS = dSX; // Prefer Width
+             }
+         } else {
+             // Side handle (not possible with current UI which only has corners)
+             dS = (dSX != 0) ? dSX : dSY;
+         }
+         
+         dSX = dS;
+         dSY = dS; 
+      }
 
-             newScaleX -= dScaleX;
-             newScaleY += dScaleY;
-        }
+      double finalSX = initialSX + dSX;
+      double finalSY = initialSY + dSY;
+      
+      // 4. ANCHORING LOGIC (The "Shift")
+      // We moved the edge by (dSX * W). 
+      // Center must shift by (dSX * W) / 2 in the direction of the handle.
+      
+      double localShiftX = (finalSX - initialSX) * intrinsicSize.width / 2.0;
+      double localShiftY = (finalSY - initialSY) * intrinsicSize.height / 2.0;
+      
+      // If expanding Right (handleX > 0), Center moves Right (+).
+      // If expanding Left (handleX < 0), Center moves Left (-).
+      // Logic handles this automatically: dSX contains sign.
+      // Wait. dSX = +0.1 (Grow). 
+      // If Right Handle: we want Center to move Right (+). shift = +0.05 * W.
+      // If Left Handle: we want Center to move Left (-). shift = -0.05 * W.
+      // But dSX is +0.1 for BOTH cases if growing.
+      // So we must multiply by handle sign.
+
+      if (handleAlignment.x != 0) localShiftX *= handleAlignment.x;
+      if (handleAlignment.y != 0) localShiftY *= handleAlignment.y;
+      
+      if (widget.lockAspect) {
+          // If locked, we need to enforce anchor on the stationary corner.
+          // Handle TopRight -> Anchor BottomLeft.
+          // Shift X moves Right (+). Shift Y moves Up (-).
+          // handleX=1, handleY=-1.
+          // localShiftX (+) OK. localShiftY (-) OK.
+          // It works.
       }
       
-      // MINIMUM SCALE CLAMP (Prevent vanishing)
-      if (newScaleX.abs() < 0.3) newScaleX = 0.3 * (newScaleX < 0 ? -1 : 1);
-      if (newScaleY.abs() < 0.3) newScaleY = 0.3 * (newScaleY < 0 ? -1 : 1);
-
+      // Rotate Shift into Global Space
+      // Shift is vector in object's local unrotated space.
+      // GlobalShift = Rotate(Shift, rotation)
+      
+      // ROTATION CORRECTION:
+      double rot = _initialTransform!.rotation * pi / 180.0;
+      double globalShiftX = localShiftX * cos(rot) - localShiftY * sin(rot);
+      double globalShiftY = localShiftX * sin(rot) + localShiftY * cos(rot);
+      
       widget.onUpdate(MediaTransform(
-        scaleX: newScaleX,
-        scaleY: newScaleY,
-        translateX: widget.transform.translateX,
-        translateY: widget.transform.translateY,
-        rotation: widget.transform.rotation,
-        crop: widget.transform.crop,
+         scaleX: finalSX,
+         scaleY: finalSY,
+         translateX: _initialTransform!.translateX + globalShiftX,
+         translateY: _initialTransform!.translateY + globalShiftY,
+         rotation: _initialTransform!.rotation,
+         crop: _initialTransform!.crop
       ));
   }
 
@@ -363,50 +425,62 @@ class _TransformGizmoState extends State<TransformGizmo> {
     // Dynamic Padding
     final double sX = t.scaleX.abs();
     final double sY = t.scaleY.abs();
-    // FORCE NO PADDING TO PREVENT VIDEO SHRINKING
-    final double padX = 0; 
-    final double padY = 0;
     
     return LayoutBuilder(
       builder: (context, constraints) {
-        return Stack(
+          double pX = 0;
+          double pY = 0;
+          
+          if (widget.contentSize != null) {
+              pX = (constraints.maxWidth - widget.contentSize!.width) / 2;
+              pY = (constraints.maxHeight - widget.contentSize!.height) / 2;
+              if (pX < 0) pX = 0;
+              if (pY < 0) pY = 0;
+          }
+          final double padX = pX;
+          final double padY = pY;
+    
+          return Stack(
           alignment: Alignment.center,
           clipBehavior: Clip.none,
           children: [
             // 1. The Content (Child) transformed.
-            Transform(
-                transform: Matrix4.identity()
-                  ..translate(t.translateX, t.translateY)
-                  ..rotateZ(t.rotation * pi / 180)
-                  ..scale(t.scaleX, t.scaleY),
-                alignment: Alignment.center,
-                  child: Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                       // LAYER 1: Video Content (Background)
-                       Padding(
-                         padding: EdgeInsets.symmetric(horizontal: padX, vertical: padY),
-                         child: KeyedSubtree(
-                           key: _contentKey,
-                           child: widget.child,
+            ClipRect(
+              clipBehavior: Clip.hardEdge,
+              child: Transform(
+                  transform: Matrix4.identity()
+                    ..translate(t.translateX, t.translateY)
+                    ..rotateZ(t.rotation * pi / 180)
+                    ..scale(t.scaleX, t.scaleY),
+                  alignment: Alignment.center,
+                    child: Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                         // LAYER 1: Video Content (Background)
+                         Padding(
+                           padding: EdgeInsets.symmetric(horizontal: padX, vertical: padY),
+                           child: KeyedSubtree(
+                             key: _contentKey,
+                             child: widget.child,
+                           ),
                          ),
-                       ),
-                       
-                       // LAYER 2: Pan Handler (Covers video + padding)
-                       // Captures drag events for Pan, blocking video controls if they conflict
-                       _buildPanHandler(),
-                       
-                       // LAYER 3: Crop UI (If active)
-                       // Padding applied inside _buildCropUI via Positioned offsets to avoid ParentDataWidget error
-                       if(widget.isCropMode && widget.editMode == EditMode.crop && t.crop != null) 
-                          _buildCropUI(t.crop!, t, padX, padY),
-
-                       // LAYER 4: Standard UI (Zoom handles)
-                       // Positioned with explicit offsets, sits on top
-                       if(widget.isCropMode && widget.editMode == EditMode.zoom)
-                          ..._buildStandardUI(t, padX, padY),
-                    ],
-                  ),
+                         
+                         // LAYER 2: Pan Handler (Covers video + padding)
+                         // Captures drag events for Pan, blocking video controls if they conflict
+                         _buildPanHandler(),
+                         
+                         // LAYER 3: Crop UI (If active)
+                         // Padding applied inside _buildCropUI via Positioned offsets to avoid ParentDataWidget error
+                         if(widget.isSelected && widget.isCropMode && widget.editMode == EditMode.crop && t.crop != null) 
+                            _buildCropUI(t.crop!, t, padX, padY),
+  
+                         // LAYER 4: Standard UI (Zoom handles)
+                         // Positioned with explicit offsets, sits on top
+                         if(widget.isSelected && widget.isCropMode && widget.editMode == EditMode.zoom)
+                            ..._buildStandardUI(t, padX, padY),
+                      ],
+                    ),
+              ),
             ),
           ],
         );
@@ -520,33 +594,6 @@ class _TransformGizmoState extends State<TransformGizmo> {
           _buildHandle(Alignment.bottomLeft, t.scaleX, padX, padY),
           _buildHandle(Alignment.bottomRight, t.scaleX, padX, padY),
           
-           // Rotate
-           Positioned(
-             top: padY - (40 / globalScale) / t.scaleY.abs(), 
-             left: 0,
-             right: 0,
-             child: Center(
-               child: GestureDetector(
-                 onPanStart: (d) => _onPanStart(d),
-                 onPanUpdate: (d) => _onRotateUpdate(d, Size.zero),
-                 behavior: HitTestBehavior.opaque,
-                 child: Container(
-                   width: (48 / globalScale) / t.scaleX.abs(), 
-                   height: (48 / globalScale) / t.scaleY.abs(),
-                   color: Colors.transparent, // Hit area
-                   alignment: Alignment.center,
-                   child: Container(
-                     width: (20 / globalScale) / t.scaleX.abs(), 
-                     height: (20 / globalScale) / t.scaleY.abs(),
-                     decoration: const BoxDecoration(
-                       color: Colors.green,
-                       shape: BoxShape.circle,
-                     ),
-                   ),
-                 ),
-               ),
-             ),
-           )
         ];
   }
   
@@ -594,9 +641,9 @@ class _TransformGizmoState extends State<TransformGizmo> {
      double safeSX = sX.abs(); if (safeSX < 0.001) safeSX = 0.001;
      double safeSY = sY.abs(); if (safeSY < 0.001) safeSY = 0.001;
      
-     // INCREASED HIT AREA TO 96px
-     double w = (96.0 / globalScale) / safeSX;
-     double h = (96.0 / globalScale) / safeSY;
+     // INCREASED HIT AREA TO 150px (was 96)
+     double w = (150.0 / globalScale) / safeSX;
+     double h = (150.0 / globalScale) / safeSY;
      
      return Positioned(
        left: x - (w / 2), 
@@ -638,9 +685,9 @@ class _TransformGizmoState extends State<TransformGizmo> {
      
      double safeSY = widget.transform.scaleY.abs(); if (safeSY < 0.001) safeSY = 0.001;
 
-     // INCREASED HIT AREA TO 96px (Radius 48)
-     double radiusX = (48.0 / globalScale) / safeSX;
-     double radiusY = (48.0 / globalScale) / safeSY;
+     // INCREASED HIT AREA TO 150px (Radius 75)
+     double radiusX = (75.0 / globalScale) / safeSX;
+     double radiusY = (75.0 / globalScale) / safeSY;
      
      return Positioned(
        left: align.x < 0 ? (padX - radiusX) : null, 
@@ -652,8 +699,8 @@ class _TransformGizmoState extends State<TransformGizmo> {
          onPanStart: _onPanStart,
          onPanUpdate: (d) => _onScaleUpdate(d, align),
          child: Container(
-           width: (96.0 / globalScale) / safeSX,
-           height: (96.0 / globalScale) / safeSY,
+           width: (150.0 / globalScale) / safeSX,
+           height: (150.0 / globalScale) / safeSY,
            color: Colors.transparent, // Hit area
            alignment: Alignment.center,
            child: Container(

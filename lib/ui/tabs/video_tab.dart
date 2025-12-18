@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 
 import 'dart:ui' as ui;
 
@@ -16,6 +17,7 @@ import '../../models/show_manifest.dart';
 import '../../models/media_transform.dart';
 import '../../state/show_state.dart';
 import '../../services/effect_service.dart';
+import '../../services/ffmpeg_service.dart';
 import '../widgets/pixel_grid_painter.dart';
 import '../widgets/transform_gizmo.dart';
 import '../widgets/effect_renderer.dart';
@@ -23,6 +25,7 @@ import '../widgets/transfer_dialog.dart';
 import '../widgets/layer_renderer.dart';
 import '../../models/layer_config.dart';
 import '../widgets/glass_container.dart';
+import '../widgets/layer_controls.dart'; // Import new widget
 
 // Enum removed, using from transform_gizmo.dart
 
@@ -38,10 +41,16 @@ class _VideoTabState extends State<VideoTab> {
   late final VideoController _bgController;
   late final Player _fgPlayer;
   late final VideoController _fgController;
+  late final Player _mdPlayer;
+  late final VideoController _mdController;
+  
+  String? _loadedBgPath;
+  String? _loadedMdPath;
+  String? _loadedFgPath;
   
 
   
-  bool _isForegroundSelected = false; // False = Background, True = Foreground
+  LayerTarget _selectedLayer = LayerTarget.foreground;
   
   // REMOVED: bool _isEditingCrop = false;
   // REMOVED: MediaTransform? _tempTransform;
@@ -55,13 +64,15 @@ class _VideoTabState extends State<VideoTab> {
 
   bool _isPlaying = false;
   late final StreamSubscription<bool> _playingSubscription;
+  late final StreamSubscription<bool> _fgPlayingSubscription;
+  late final StreamSubscription<bool> _mdPlayingSubscription;
 
   bool _pendingAutoFit = false;
-  late final StreamSubscription<int?> _widthSubscription;
-  late final StreamSubscription<int?> _heightSubscription;
+  final List<StreamSubscription> _dimensionSubs = [];
 
   // NEW: Aspect Ratio Lock State
-  bool _lockAspectRatio = true;
+  // NEW: Aspect Ratio Lock State (Managed by LayerConfig now)
+  // bool _lockAspectRatio = true; // REMOVED
   // REMOVED: EditMode _editMode = EditMode.zoom;
 
   // NEW: Effects State
@@ -77,31 +88,51 @@ class _VideoTabState extends State<VideoTab> {
     super.initState();
     _bgPlayer = Player();
     _bgController = VideoController(_bgPlayer);
+
+    _mdPlayer = Player();
+    _mdController = VideoController(_mdPlayer);
     
     _fgPlayer = Player();
     _fgController = VideoController(_fgPlayer);
     
-    _playingSubscription = _bgPlayer.stream.playing.listen((playing) {
-      if (mounted) {
-        setState(() {
-          _isPlaying = playing;
-        });
-      }
-    });
-
-    // Auto-Fit Listener (On Background Video)
-    _widthSubscription = _bgPlayer.stream.width.listen((w) => _checkAutoFit());
-    _heightSubscription = _bgPlayer.stream.height.listen((h) => _checkAutoFit());
+    // Unified Playing Listener
+    // Note: We deliberately DO NOT listen to player state to drive _isPlaying.
+    // This allows effects to keep "playing" (animating) even if video players stop.
+    // _playingSubscription = _bgPlayer.stream.playing.listen(updatePlayingState);
+    
+    // Auto-Fit & Intersection Listeners (All Players)
+    void addListeners(Player p) {
+        _dimensionSubs.add(p.stream.width.listen((_) => _onDimensionsChanged()));
+        _dimensionSubs.add(p.stream.height.listen((_) => _onDimensionsChanged()));
+    }
+    
+    addListeners(_bgPlayer);
+    addListeners(_mdPlayer);
+    addListeners(_fgPlayer);
   }
   
+  void _onDimensionsChanged() {
+    _checkAutoFit();
+    _calculateIntersection();
+  }
+
   void _checkAutoFit() {
      if (!_pendingAutoFit) return;
      
-     final w = _bgPlayer.state.width;
-     final h = _bgPlayer.state.height;
+     // Determine active player
+     final Player? activePlayer = switch(_selectedLayer) {
+        LayerTarget.background => _bgPlayer,
+        LayerTarget.middle => _mdPlayer,
+        LayerTarget.foreground => _fgPlayer,
+     };
+     
+     if (activePlayer == null) return;
+
+     final w = activePlayer.state.width;
+     final h = activePlayer.state.height;
      
      if (w != null && h != null && w > 0 && h > 0) {
-        _autoFitVideoToMatrix(w, h);
+        _performAutoFit(w, h, _selectedLayer);
         _pendingAutoFit = false;
      }
   }
@@ -109,84 +140,121 @@ class _VideoTabState extends State<VideoTab> {
   void _autoFitVideoToMatrix(int videoW, int videoH) {
      final show = context.read<ShowState>().currentShow;
      if (show == null || show.fixtures.isEmpty) return;
+     
+     // Only auto-fit if we are loading into the currently selected layer or force it?
+     // Actually, this method is called by _bgPlayer stream. 
+     // If we load FG, we need a separate listener for FG player!
+     // But for now, let's just make sure it targets the correct layer if we assume this is triggered by "Load Video" on active layer.
+     // But _checkAutoFit is ONLY listening to BG player (lines 96-97).
+     // We need to listen to FG player too.
+  }
+  
+  // Revised AutoFit that takes layer target
+  void _performAutoFit(int w, int h, LayerTarget targetLayer) {
+     final show = context.read<ShowState>().currentShow;
+     if (show == null || show.fixtures.isEmpty) return;
 
-     // 1. Calculate Matrix Bounds (pixels)
-     double boundsW = 0;
-     double boundsH = 0;
+     // 1. Calculate Matrix Bounds (Correctly)
+     double minMx = double.infinity, maxMx = double.negativeInfinity;
+     double minMy = double.infinity, maxMy = double.negativeInfinity;
      const double gridSize = 10.0;
      
      for (var f in show.fixtures) {
-        double fw = f.width * gridSize;
-        double fh = f.height * gridSize;
-        if (fw > boundsW) boundsW = fw;
-        if (fh > boundsH) boundsH = fh;
+        for (var p in f.pixels) {
+           double px = p.x * gridSize;
+           double py = p.y * gridSize;
+           if (px < minMx) minMx = px;
+           if (px > maxMx) maxMx = px;
+           if (py < minMy) minMy = py;
+           if (py > maxMy) maxMy = py;
+        }
      }
+     maxMx += gridSize; 
+     maxMy += gridSize;
      
-     if (boundsW == 0 || boundsH == 0) return;
+     double matW = maxMx - minMx;
+     double matH = maxMy - minMy;
+     
+     if (matW <= 0 || matH <= 0) return;
 
-     // 2. Calculate Scale required to FIT VIDEO INSIDE matrix (Contain)
-     // "both x and y should fit" implies we fully show the video.
-     double scaleX = boundsW / videoW;
-     double scaleY = boundsH / videoH;
+     // 2. Calculate Scale (Contain)
+     double scaleX = matW / w;
+     double scaleY = matH / h;
+     double scale = (scaleX < scaleY) ? scaleX : scaleY; // Contain
      
-     // Use the smaller scale to ensure the video fits entirely within the matrix bounds
-     // (leaving empty space if aspect ratios differ, i.e., "parts of matrix not covered")
-     double scale = (scaleX < scaleY) ? scaleX : scaleY;
-     
-     // Optional: Add a little padding or precise match?
-     // Precise match is better for mapping.
-
-     // 3. Center it?
-     // Default video position is centered in the view.
-     // Default matrix position is (0,0) in the grid painter to (maxW, maxH).
-     // Ideally we want 0,0 of video to align with 0,0 of matrix if we scaled it?
-     // Video is drawn centered. Matrix is drawn centered.
-     // So if we just scale it, they should align if their centers align.
-     
+     // 3. Apply
      WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        context.read<ShowState>().updateTransform(MediaTransform(
-           scaleX: scale,
-           scaleY: scale,
-           translateX: 0,
-           translateY: 0,
-           rotation: 0
-        ));
+        context.read<ShowState>().updateLayer(
+           target: targetLayer,
+           transform: MediaTransform(
+             scaleX: scale,
+             scaleY: scale,
+             translateX: 0,
+             translateY: 0,
+             rotation: 0
+          )
+        );
         
         ScaffoldMessenger.of(context).showSnackBar(
-           SnackBar(content: Text("Auto-scaled video to match matrix (Scale: ${scale.toStringAsFixed(2)}x)"), duration: const Duration(seconds: 1))
+           SnackBar(content: Text("Auto-scaled ${targetLayer.name.toUpperCase()} to match matrix"), duration: const Duration(seconds: 1))
         );
+        
+        // Trigger intersection update here too for file loads
+        _calculateIntersection();
      });
   }
 
   @override
   void dispose() {
-    _playingSubscription.cancel();
-    _widthSubscription.cancel();
-    _heightSubscription.cancel();
+    for (var sub in _dimensionSubs) sub.cancel();
     _bgPlayer.dispose();
+    _mdPlayer.dispose();
     _fgPlayer.dispose();
     super.dispose();
   }
 
+  // --- SHOW NAME UPDATE LOGIC ---
   Future<void> _pickVideo(BuildContext context) async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.video,
-      dialogTitle: 'Select Video File (${_isForegroundSelected ? "Foreground" : "Background"})',
+      dialogTitle: 'Select Video File (${_selectedLayer.name.toUpperCase()})',
     );
 
     if (result != null && result.files.single.path != null) {
       final path = result.files.single.path!;
       if (context.mounted) {
          context.read<ShowState>().updateLayer(
-            isForeground: _isForegroundSelected,
+            target: _selectedLayer,
             type: LayerType.video,
             path: path
          );
+         
+         // Force fit to matrix after loading
+         WidgetsBinding.instance.addPostFrameCallback((_) {
+             if (mounted) {
+               context.read<ShowState>().updateLayer(target: _selectedLayer, lockAspectRatio: true);
+               _fitToMatrix();
+             }
+         });
       }
     }
   }
 
+  // Helper to resolve layer size (Video or Effect default)
+  Size _resolveLayerSize(ShowManifest show, LayerConfig layer) {
+     if (layer.type == LayerType.video) {
+        if (layer == show.backgroundLayer) {
+           return Size((_bgPlayer.state.width ?? 1920).toDouble(), (_bgPlayer.state.height ?? 1080).toDouble());
+        } else if (layer == show.middleLayer) {
+           return Size((_mdPlayer.state.width ?? 1920).toDouble(), (_mdPlayer.state.height ?? 1080).toDouble());
+        } else {
+           return Size((_fgPlayer.state.width ?? 1920).toDouble(), (_fgPlayer.state.height ?? 1080).toDouble());
+        }
+     }
+     // Effects default to HD
+     return const Size(1920, 1080);
+  }
 
   Future<void> _exportEffect() async {
      if (_selectedEffect == null) return;
@@ -218,15 +286,21 @@ class _VideoTabState extends State<VideoTab> {
 
      try {
        // Use params from storage
-       final activeLayer = show.backgroundLayer; // TODO: or foreground? Effect export implies active?
+       final show = context.read<ShowState>().currentShow;
+       if (show == null) throw Exception("No show loaded");
+
+       // final activeLayer = show.backgroundLayer; // TODO: or foreground? Effect export implies active?
        // _exportEffect logic currently uses _selectedEffect.
        // Let's assume we export the effect that is currently selected/edited.
        
         final filter = EffectService.getFFmpegFilter(
            _selectedEffect ?? EffectType.rainbow, 
-           // _effectParams was removed. Use active layer params.
-           // Which layer? _selectedEffect implies we are editing one.
-           (_isForegroundSelected ? show.foregroundLayer : show.backgroundLayer).effectParams
+           // Use active layer params
+           (switch(_selectedLayer) {
+              LayerTarget.background => show.backgroundLayer,
+              LayerTarget.middle => show.middleLayer,
+              LayerTarget.foreground => show.foregroundLayer,
+           }).effectParams
         );
         // Use system ffmpeg
         const String ffmpegPath = 'ffmpeg';
@@ -306,177 +380,332 @@ class _VideoTabState extends State<VideoTab> {
 
 
 
+  // MARK: - Show Management
+  
+  Future<void> _saveShow() async {
+      final show = context.read<ShowState>().currentShow;
+      if (show == null) return;
+      
+      String? outputPath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save Show',
+        fileName: '${show.name}.show',
+        allowedExtensions: ['show', 'json'],
+        type: FileType.custom,
+      );
+      
+      if (outputPath != null) {
+         try {
+             // Ensure extension
+             if (!outputPath.endsWith('.show') && !outputPath.endsWith('.json')) {
+                 outputPath += ".show";
+             }
+             
+             final jsonStr = jsonEncode(show.toJson());
+             await File(outputPath).writeAsString(jsonStr);
+             
+             if (mounted) {
+                 ScaffoldMessenger.of(context).showSnackBar(
+                     SnackBar(content: Text("Show saved to $outputPath"), backgroundColor: Colors.green)
+                 );
+             }
+         } catch (e) {
+             debugPrint("Error saving show: $e");
+              if (mounted) {
+                 ScaffoldMessenger.of(context).showSnackBar(
+                     SnackBar(content: Text("Failed to save: $e"), backgroundColor: Colors.red)
+                 );
+             }
+         }
+      }
+  }
+
+  Future<void> _loadShow() async {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+          dialogTitle: "Load Show",
+          type: FileType.custom,
+          allowedExtensions: ['show', 'json'],
+      );
+      
+      if (result != null && result.files.single.path != null) {
+          try {
+              final file = File(result.files.single.path!);
+              final jsonStr = await file.readAsString();
+              final jsonMap = jsonDecode(jsonStr);
+              
+              final newShow = ShowManifest.fromJson(jsonMap);
+              
+              if (mounted) {
+                  // We need to reload players if paths changed, 
+                  // but ShowState/LayerRenderer handling should potentially handle it?
+                  // Currently LayerRenderer listens to show changes?
+                  // No, LayerRenderer gets 'layer' passed.
+                  // If we replace the Show in ShowState, the UI rebuilds.
+                  // LayerRenderer init logic might need reset.
+                  
+                  // Force stop existing playback
+                  await _bgPlayer.stop();
+                  await _mdPlayer.stop();
+                  await _fgPlayer.stop();
+                  
+                  // Reset tracking to force re-open in _syncLayers
+                  _loadedBgPath = null;
+                  _loadedMdPath = null;
+                  _loadedFgPath = null;
+                  
+                  context.read<ShowState>().loadManifest(newShow);
+                  
+                  // Reset Players for new media
+                  // Assuming LayerRenderer will re-init controllers?
+                  // LayerRenderer uses `widget.layer` and checks changes.
+                  
+                  setState(() {
+                      // Check if any layer has active content (Video or Effect)
+                      bool hasContent = 
+                          (newShow.backgroundLayer.type != LayerType.none) ||
+                          (newShow.middleLayer.type != LayerType.none) ||
+                          (newShow.foregroundLayer.type != LayerType.none);
+                      
+                      _isPlaying = hasContent; 
+                      // Don't auto-fit on load show, respect saved transform
+                  });
+                  
+                  // Trigger Sync to actually start playback if IsPlaying is true
+                  _syncLayers(newShow);
+
+                   ScaffoldMessenger.of(context).showSnackBar(
+                     const SnackBar(content: Text("Show loaded successfully"), backgroundColor: Colors.green)
+                 );
+              }
+          } catch (e) {
+              debugPrint("Error loading show: $e");
+              if (mounted) {
+                 ScaffoldMessenger.of(context).showSnackBar(
+                     SnackBar(content: Text("Failed to load: $e"), backgroundColor: Colors.red)
+                 );
+             }
+          }
+      }
+  }
+
+  void _initializeShow() {
+      showDialog(
+        context: context, 
+        builder: (c) => AlertDialog(
+          title: const Text("Initialize Show?"),
+          content: const Text("This will clear all layers and reset settings. Are you sure?"),
+          actions: [
+            TextButton(
+               onPressed: () => Navigator.pop(context),
+               child: const Text("Cancel"),
+            ),
+             TextButton(
+               onPressed: () {
+                 Navigator.pop(context);
+                 _performInitialize();
+               },
+               child: const Text("Initialize", style: TextStyle(color: Colors.red)),
+            ),
+          ]
+        )
+      );
+  }
+  
+  void _performInitialize() {
+      _bgPlayer.stop();
+      _mdPlayer.stop();
+      _fgPlayer.stop();
+      
+      setState(() {
+         _isPlaying = false;
+         _loadedBgPath = null;
+         _loadedMdPath = null;
+         _loadedFgPath = null;
+      });
+      
+      final state = context.read<ShowState>();
+      state.updateLayer(target: LayerTarget.background, type: LayerType.none, path: null, effect: null, lockAspectRatio: true, opacity: 1.0, transform: MediaTransform.identity());
+      state.updateLayer(target: LayerTarget.middle, type: LayerType.none, path: null, effect: null, lockAspectRatio: true, opacity: 1.0, transform: MediaTransform.identity());
+      state.updateLayer(target: LayerTarget.foreground, type: LayerType.none, path: null, effect: null, lockAspectRatio: true, opacity: 1.0, transform: MediaTransform.identity());
+      
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Show Initialized")));
+  }
+
+  Future<void> _renderVideo() async {
+      // Formerly _exportVideo
+      // Include logic to export
+      await _exportVideo();
+  }
+
+  Widget _buildIconFn(IconData icon, String label, Color color, VoidCallback? onTap) {
+      bool isEnabled = onTap != null;
+      return Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 10),
+            decoration: BoxDecoration(
+              color: isEnabled ? Colors.white.withOpacity(0.1) : Colors.white.withOpacity(0.02),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: isEnabled ? color.withOpacity(0.3) : Colors.transparent),
+            ),
+            child: Column(
+               children: [
+                 Icon(icon, color: isEnabled ? color : Colors.white24, size: 20),
+                 const SizedBox(height: 4),
+                 Text(label, style: TextStyle(color: isEnabled ? Colors.white70 : Colors.white24, fontSize: 10, fontWeight: FontWeight.bold)),
+               ],
+            ),
+          ),
+        ),
+      );
+  }
+
   Future<void> _exportVideo() async {
-    final show = context.read<ShowState>().currentShow;
-    if (show == null || show.mediaFile.isEmpty) return;
+     
+     // Need FfmpegService
+     final show = context.read<ShowState>().currentShow;
+     if (show == null) return;
 
-     // Must have intersection to export
-     if (_currentIntersection == null || _intersectW <= 0 || _intersectH <= 0) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No Intersection with Matrix! Move video over matrix to export.")));
-        return;
-     }
-
-     // TODO: Support exporting composition of both layers?
-     // For now, export background layer if it's a video.
-     if (show.backgroundLayer.type != LayerType.video || show.backgroundLayer.path == null) {
-         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Background layer is not a video. Export not supported yet.")));
+     // Check if we have background/any layer
+     if (show.backgroundLayer.type == LayerType.none && show.middleLayer.type == LayerType.none && show.foregroundLayer.type == LayerType.none) {
+         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No content to render!")));
          return;
      }
-     
-     final sourcePath = show.backgroundLayer.path!;
 
     final outputPath = await FilePicker.platform.saveFile(
-      dialogTitle: 'Save Exported Video',
-      fileName: 'exported_video.mp4',
+      dialogTitle: 'Save Rendered Video',
+      fileName: 'composite_render.mp4',
       type: FileType.video,
       allowedExtensions: ['mp4'],
     );
 
     if (outputPath == null) return;
-
     if (!mounted) return;
+
+    // Show Progress Dialog
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (c) => AlertDialog(
+      builder: (c) => const AlertDialog(
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const CircularProgressIndicator(),
-            const SizedBox(height: 20),
-            const Text("Exporting Video..."),
-            const SizedBox(height: 10),
-            Text("Resolution: ${_intersectW}x${_intersectH}\nRegion: ${_currentIntersection!.left.toStringAsFixed(0)},${_currentIntersection!.top.toStringAsFixed(0)} to ${_currentIntersection!.right.toStringAsFixed(0)},${_currentIntersection!.bottom.toStringAsFixed(0)}", 
-                textAlign: TextAlign.center, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            CircularProgressIndicator(),
+            SizedBox(height: 20),
+            Text("Rendering Composite Video..."),
+            Text("Please wait, this may take a moment.", style: TextStyle(fontSize: 10, color: Colors.grey)),
           ],
         ),
       ),
     );
 
     try {
-      final baseT = show.backgroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
-      final t = baseT;
-      
-       final width = _bgPlayer.state.width;
-       final height = _bgPlayer.state.height;
+       // Get Video Sizes
+       final bgSize = Size((_bgPlayer.state.width ?? 1920).toDouble(), (_bgPlayer.state.height ?? 1080).toDouble());
+       final mdSize = Size((_mdPlayer.state.width ?? 1920).toDouble(), (_mdPlayer.state.height ?? 1080).toDouble());
+       final fgSize = Size((_fgPlayer.state.width ?? 1920).toDouble(), (_fgPlayer.state.height ?? 1080).toDouble()); // Corrected FG Size
 
-      // 1. Calculate Source Crop based on Intersection
-      // The intersection is in "Visual Logic Space" (where GridSize is 10.0)
-      // We need to map this back to Video Source Pixels.
-      
-      // Video Visual Rect (Logic Space)
-      // Center at tx, ty. Size w*sx, h*sy.
-      final scaledW = (width ?? 1920) * t.scaleX;
-      final scaledH = (height ?? 1080) * t.scaleY;
-      final vidLeft = t.translateX - (scaledW / 2);
-      final vidTop = t.translateY - (scaledH / 2);
-      
-      // Relative Crop in Visual Units from Video Left/Top
-      double cropVisX = _currentIntersection!.left - vidLeft;
-      double cropVisY = _currentIntersection!.top - vidTop;
-      
-      // Clamp (floating point drift)
-      if (cropVisX < 0) cropVisX = 0;
-      if (cropVisY < 0) cropVisY = 0;
-      
-      double cropVisW = _currentIntersection!.width;
-      double cropVisH = _currentIntersection!.height;
-      
-      // 2. Map Visual Crop to Source Pixels
-      // Ratio = Source / Visual
-      // Source W / Scaled W = 1 / Scale
-      
-      double sourceX = cropVisX / t.scaleX;
-      double sourceY = cropVisY / t.scaleY;
-      double sourceW = cropVisW / t.scaleX;
-      double sourceH = cropVisH / t.scaleY;
-      
-      // Ensure we don't exceed source bounds
-      if (sourceX + sourceW > (width ?? 1920)) sourceW = (width ?? 1920) - sourceX;
-      if (sourceY + sourceH > (height ?? 1080)) sourceH = (height ?? 1080) - sourceY;
-      
-      // 3. Construct FFmpeg Filter Chain
-      List<String> filters = [];
-      
-      // A. Crop Source
-      filters.add('crop=${sourceW.floor()}:${sourceH.floor()}:${sourceX.floor()}:${sourceY.floor()}');
-      
-      // B. Scale to Target Resolution (Matrix Size)
-      // Ideally sourceW should verify to match targetW * 10.0 / scale?
-      // Yes. Visual Size = Source * Scale. Grid Size = Visual / 10.
-      // Target Res = Grid Size.
-      // So Source -> Scale -> Target.
-      
-      // We crop first (in source pixels). Then scale that cropped region to target resolution.
-      // IMPORTANT: libx264 requires even dimensions.
-      int outW = (_intersectW % 2 == 0) ? _intersectW : _intersectW - 1;
-      int outH = (_intersectH % 2 == 0) ? _intersectH : _intersectH - 1;
-      if (outW <= 0) outW = 2; // Safety
-      if (outH <= 0) outH = 2;
+       // Execute Render
+       // 1. Calculate Full Matrix Bounds (Global Logic Space)
+       double minMx = double.infinity, maxMx = double.negativeInfinity;
+       double minMy = double.infinity, maxMy = double.negativeInfinity;
+       const double gridSize = 10.0;
+       
+       if (show.fixtures.isEmpty) {
+           throw Exception("No Fixtures defined! Cannot determine output resolution.");
+       }
 
-      filters.add('scale=$outW:$outH:flags=lanczos');
-      
-      // C. Removed minterpolate for stability. It is very heavy and crash prone on some backends.
-      // filters.add("minterpolate='mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1'");
+       for (var f in show.fixtures) {
+          for (var p in f.pixels) {
+              double px = p.x * gridSize;
+              double py = p.y * gridSize;
+              if (px < minMx) minMx = px;
+              if (px > maxMx) maxMx = px;
+              if (py < minMy) minMy = py;
+              if (py > maxMy) maxMy = py;
+          }
+       }
+       maxMx += gridSize; 
+       maxMy += gridSize;
+       
+       double matW = maxMx - minMx;
+       double matH = maxMy - minMy;
+       
+       // 2. Define Canvas Rect (centered at 0,0 relative to world, but we need Global Coords)
+       // The matrix pixels are in Global Logic Space.
+       // The matrixRect should be the bounding box of all pixels.
+       Rect matrixRect = Rect.fromLTRB(minMx, minMy, maxMx, maxMy);
+       
+       // 3. Define Resolution
+       int resW = (matW / gridSize).round();
+       int resH = (matH / gridSize).round();
 
-      String filterString = filters.join(',');
-      
-      // Use system ffmpeg
-      const String ffmpegPath = 'ffmpeg';
+       debugPrint("Render Target: $resW x $resH (Logic: ${matrixRect.toString()})");
 
-       List<String> args = [
-         '-i', sourcePath,
-        '-vf', filterString,
-        '-c:v', 'libx264',
-        '-pix_fmt', 'yuv420p',
-        '-preset', 'medium', // Better compression for final export
-        '-y', outputPath
-      ];
+       final result = await FfmpegService.renderShow(
+          show: show,
+          intersection: matrixRect,
+          resW: resW,
+          resH: resH,
+          outputPath: outputPath,
+          bgVideoSize: bgSize,
+          mdVideoSize: mdSize,
+          fgVideoSize: fgSize,
+       );
 
-      debugPrint("FFmpeg Command: $ffmpegPath ${args.join(' ')}");
-
-      final result = await Process.run(ffmpegPath, args);
-      
-      if (mounted) {
-        Navigator.pop(context); // Hide loader
-        if (result.exitCode == 0) {
-             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Video Exported Successfully!")));
-             
-             if (outputPath != null) {
-                context.read<ShowState>().updateMedia(outputPath);
-             }
-        } else {
-             // Show Detailed Error Dialog
-             showDialog(
-               context: context,
-               builder: (c) => AlertDialog(
-                 title: const Text("Export Failed"),
-                 content: SingleChildScrollView(
-                   child: Text("FFmpeg Error (Exit ${result.exitCode}):\n\n${result.stderr}"),
-                 ),
-                 actions: [
-                   TextButton(onPressed: () => Navigator.pop(c), child: const Text("OK")),
-                 ],
-               ),
-             );
-        }
-      }
+       if (mounted) {
+          Navigator.pop(context); // Hide Dialog
+          
+          if (result.exitCode == 0) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Render Successful!"), backgroundColor: Colors.green));
+              // Update media to cached result?
+              // context.read<ShowState>().updateMedia(outputPath); // Optional
+          } else {
+             _showErrorDialog("Render Failed (Exit ${result.exitCode})", result.stderr.toString());
+          }
+       }
     } catch (e) {
-      debugPrint("Export Error: $e");
-      if(mounted) {
+       if (mounted) {
          Navigator.pop(context);
-         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
-      }
+         _showErrorDialog("Render Error", e.toString());
+       }
     }
   }
+
+  void _showErrorDialog(String title, String message) {
+     showDialog(
+       context: context,
+       builder: (c) => AlertDialog(
+         title: Text(title),
+         content: SingleChildScrollView(child: Text(message)),
+         actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text("OK"))],
+       )
+     );
+  }
+
+
+
 
   void _fitToMatrix() {
     final show = context.read<ShowState>().currentShow;
     if (show == null || show.fixtures.isEmpty) return;
 
-    final width = _bgPlayer.state.width;
-    final height = _bgPlayer.state.height;
-    if (width == null || height == null) return;
+    // Use Active Player dimensions OR Default for Effects
+    LayerConfig activeLayer = switch(_selectedLayer) {
+       LayerTarget.background => show.backgroundLayer,
+       LayerTarget.middle => show.middleLayer,
+       LayerTarget.foreground => show.foregroundLayer,
+    };
+    final size = _resolveLayerSize(show, activeLayer);
+    final width = size.width;
+    final height = size.height;
+
+    if (width <= 0 || height <= 0) return;
+    
+    // Force Aspect Ratio Lock to TRUE on Reset/Fit
+    context.read<ShowState>().updateLayer(target: _selectedLayer, lockAspectRatio: true);
     
     // 1. Calculate Matrix Bounds in "Pixel" space (10.0 scale)
     double minMx = double.infinity, maxMx = double.negativeInfinity;
@@ -505,41 +734,100 @@ class _VideoTabState extends State<VideoTab> {
     double targetScaleX = 1.0;
     double targetScaleY = 1.0;
     
-    if (!_lockAspectRatio) {
+    // Logic: Effects always Stretch. Videos check Lock.
+    final hasActiveEffect = activeLayer.type == LayerType.effect;
+    
+    // On Fit/Reset, we treat Aspect as LOCKED (Contain) unless Effect (Stretch)
+    if (hasActiveEffect) {
        // STRETCH: Visual Size == Matrix Size
        targetScaleX = matW / width;
        targetScaleY = matH / height;
     } else {
-       // CONTAIN: Fit inside Matrix
-       // Min(MatrixW / VideoW, MatrixH / VideoH)
+       // CONTAIN (Fit Inside)
+       // User reported overflows with Cover mode. Reverting to Contain.
+       // "Contain" = Min(MatrixW / VideoW, MatrixH / VideoH). Ensures ENTIRE video is visible.
        double rX = matW / width;
        double rY = matH / height;
-       double scale = (rX < rY) ? rX : rY;
+       double scale = (rX < rY) ? rX : rY; // MIN for Contain
        targetScaleX = scale;
        targetScaleY = scale;
     }
     
-    // 3. Center Alignment
-    // Reset translation to 0,0 aligns video center to matrix center (in our specific stack layout)
-    
-    setState(() {
-       // _isEditingCrop = false;
-       context.read<ShowState>().updateLayer(
-         isForeground: _isForegroundSelected, 
-         transform: MediaTransform(
-            scaleX: targetScaleX,
-            scaleY: targetScaleY,
-            translateX: 0,
-            translateY: 0,
-            rotation: 0,
-            crop: null,
-         )
-       );
-    });
+    // 3. Apply Transform
+    context.read<ShowState>().updateLayer(
+      target: _selectedLayer, 
+      transform: MediaTransform(
+         scaleX: targetScaleX,
+         scaleY: targetScaleY,
+         translateX: 0,
+         translateY: 0,
+         rotation: 0,
+         crop: null,
+      )
+    );
+       
+    // Update Intersection immediately
+    _calculateIntersection();
     
     debugPrint("Auto-Fit Applied");
     
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Auto-Fit Applied"), duration: Duration(milliseconds: 500)));
+  }
+
+  void _syncLayers(ShowManifest show) {
+    // Background
+    final bgLayer = show.backgroundLayer;
+    if (bgLayer.type != LayerType.video) {
+        if (_bgPlayer.state.playing) _bgPlayer.stop();
+        _loadedBgPath = null; // Force reload if switching back to video
+    } else {
+        final bgPath = bgLayer.path;
+        if (bgPath != _loadedBgPath) {
+          if (bgPath != null && bgPath.isNotEmpty) {
+             _bgPlayer.open(Media(bgPath), play: true);
+             _bgPlayer.setPlaylistMode(PlaylistMode.loop);
+          } else {
+             _bgPlayer.stop();
+          }
+          _loadedBgPath = bgPath;
+        }
+    }
+
+    // Middle
+    final mdLayer = show.middleLayer;
+    if (mdLayer.type != LayerType.video) {
+        if (_mdPlayer.state.playing) _mdPlayer.stop();
+        _loadedMdPath = null;
+    } else {
+        final mdPath = mdLayer.path;
+        if (mdPath != _loadedMdPath) {
+          if (mdPath != null && mdPath.isNotEmpty) {
+             _mdPlayer.open(Media(mdPath), play: true);
+             _mdPlayer.setPlaylistMode(PlaylistMode.loop);
+          } else {
+             _mdPlayer.stop();
+          }
+          _loadedMdPath = mdPath;
+        }
+    }
+
+    // Foreground
+    final fgLayer = show.foregroundLayer;
+    if (fgLayer.type != LayerType.video) {
+        if (_fgPlayer.state.playing) _fgPlayer.stop();
+        _loadedFgPath = null;
+    } else {
+        final fgPath = fgLayer.path;
+        if (fgPath != _loadedFgPath) {
+          if (fgPath != null && fgPath.isNotEmpty) {
+             _fgPlayer.open(Media(fgPath), play: true);
+             _fgPlayer.setPlaylistMode(PlaylistMode.loop);
+          } else {
+             _fgPlayer.stop();
+          }
+          _loadedFgPath = fgPath;
+        }
+    }
   }
 
   @override
@@ -556,10 +844,19 @@ class _VideoTabState extends State<VideoTab> {
 
         
         // Define active layer helper variables for UI
-        final activeLayer = _isForegroundSelected ? show.foregroundLayer : show.backgroundLayer;
+        final activeLayer = switch(_selectedLayer) {
+           LayerTarget.background => show.backgroundLayer,
+           LayerTarget.middle => show.middleLayer,
+           LayerTarget.foreground => show.foregroundLayer,
+        };
         final activeParams = activeLayer.effectParams;
 
+        Size _getLayerSize(LayerConfig layer) {
+            return _resolveLayerSize(show, layer);
+        }
+
         return Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Main Editor Area
             Expanded(
@@ -567,8 +864,7 @@ class _VideoTabState extends State<VideoTab> {
                 color: Colors.black87,
                 child: RepaintBoundary(
                   key: _previewKey,
-                  child: ClipRect(
-                    child: Stack(
+                  child: Stack(
                     alignment: Alignment.center,
                     children: [
                       // UNIFIED LAYOUT
@@ -609,19 +905,22 @@ class _VideoTabState extends State<VideoTab> {
                            return FittedBox(
                              fit: BoxFit.contain,
                              child: Container(
-                               width: matW,
-                               height: matH,
+                               width: matW + 200, // Add Padding for Gizmo Handles
+                               height: matH + 200,
                                color: Colors.transparent, // "World" Canvas
                                child: Stack(
                                  clipBehavior: Clip.none,
                                  alignment: Alignment.center,
                                  children: [
                                     // LAYER 1: Matrix (Localized)
-                                    // Translate so (minX, minY) is at (0,0) of this container
+                                    // Translate so Matrix is Centered in the Padded Container.
+                                    // Container W = MatW + 200. Center = MatW/2 + 100.
+                                    // Matrix W = MatW. Center = MatW/2.
+                                    // To align centers, Matrix must start at 100.
                                     if (hasFixtures)
                                       Positioned(
-                                        left: -minX, 
-                                        top: -minY,
+                                        left: -minX + 100, 
+                                        top: -minY + 100,
                                         child: CustomPaint(
                                           painter: PixelGridPainter(
                                              fixtures: show.fixtures, 
@@ -634,69 +933,120 @@ class _VideoTabState extends State<VideoTab> {
                                    // LAYER 2: Video/Effects Composition
                                     Center(
                                       child: OverflowBox(
-                                          minWidth: (_bgPlayer.state.width ?? 1920).toDouble(),
-                                          maxWidth: (_bgPlayer.state.width ?? 1920).toDouble(),
-                                          minHeight: (_bgPlayer.state.height ?? 1080).toDouble(),
-                                          maxHeight: (_bgPlayer.state.height ?? 1080).toDouble(),
+                                          minWidth: 0,
+                                          maxWidth: double.infinity,
+                                          minHeight: 0,
+                                          maxHeight: double.infinity,
                                           alignment: Alignment.center,
                                           child: Stack(
                                             children: [
                                               // 1. Background Layer (Bottom)
-                                              IgnorePointer(
-                                                ignoring: _isForegroundSelected, // Ignore if FG is selected (Pass-through NOT ensuring BG capture, but BG is behind)
-                                                // Actually, if FG is on top and ignoring, click goes to BG.
-                                                // If FG is on top and NOT ignoring, click goes to FG.
-                                                child: TransformGizmo(
-                                                  transform: show.backgroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0),
-                                                  isCropMode: true,
-                                                  editMode: EditMode.zoom,
-                                                  lockAspect: _lockAspectRatio,
-                                                  onDoubleTap: _fitToMatrix,
-                                                  onUpdate: (newTransform) {
-                                                    // Only update if BG is selected (redundant check but safe)
-                                                    if (!_isForegroundSelected) {
-                                                      showState.updateLayer(isForeground: false, transform: newTransform);
-                                                      _calculateIntersection();
-                                                    }
-                                                  },
-                                                  child: SizedBox(
-                                                    width: (_bgPlayer.state.width ?? 1920).toDouble(),
-                                                    height: (_bgPlayer.state.height ?? 1080).toDouble(),
-                                                    child: LayerRenderer(
-                                                      layer: show.backgroundLayer,
-                                                      controller: _bgController
+                                              if (show.backgroundLayer.type != LayerType.none)
+                                                IgnorePointer(
+                                                  ignoring: _selectedLayer != LayerTarget.background,
+                                                  child: Container(
+                                                    width: _getLayerSize(show.backgroundLayer).width + 300,
+                                                    height: _getLayerSize(show.backgroundLayer).height + 300,
+                                                    alignment: Alignment.center,
+                                                    child: TransformGizmo(
+                                                    transform: show.backgroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0),
+                                                    isCropMode: true,
+                                                    isSelected: _selectedLayer == LayerTarget.background, // NEW
+                                                    editMode: EditMode.zoom,
+                                                    lockAspect: show.backgroundLayer.type == LayerType.video ? show.backgroundLayer.lockAspectRatio : false,
+                                                    onDoubleTap: _fitToMatrix,
+                                                    onUpdate: (newTransform) {
+                                                      if (_selectedLayer == LayerTarget.background) {
+                                                        final constrained = _constrainTransform(newTransform, show.backgroundLayer, Size(matW, matH));
+                                                        showState.updateLayer(target: LayerTarget.background, transform: constrained);
+                                                        _calculateIntersection();
+                                                      }
+                                                    },
+                                                    contentSize: _getLayerSize(show.backgroundLayer),
+                                                    child: SizedBox(
+                                                      width: _getLayerSize(show.backgroundLayer).width,
+                                                      height: _getLayerSize(show.backgroundLayer).height,
+                                                      child: LayerRenderer(
+                                                        layer: show.backgroundLayer,
+                                                        controller: _bgController,
+                                                        isPlaying: _isPlaying,
+                                                      ),
                                                     ),
                                                   ),
+                                                  ),
                                                 ),
-                                              ),
 
-                                              // 2. Foreground Layer (Top)
-                                              IgnorePointer(
-                                                ignoring: !_isForegroundSelected, // Ignore if BG is selected
-                                                child: TransformGizmo(
-                                                  transform: show.foregroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0),
-                                                  isCropMode: true,
-                                                  editMode: EditMode.zoom,
-                                                  lockAspect: _lockAspectRatio,
-                                                  onDoubleTap: _fitToMatrix,
-                                                  onUpdate: (newTransform) {
-                                                    if (_isForegroundSelected) {
-                                                      showState.updateLayer(isForeground: true, transform: newTransform);
-                                                      _calculateIntersection();
-                                                    }
-                                                  },
-                                                  child: SizedBox(
-                                                    width: (_bgPlayer.state.width ?? 1920).toDouble(), // Use BG dimensions for now as reference? Or FG player dimensions?
-                                                    // Effect might default to 1920x1080.
-                                                    // If FG is video, prefer FG dimensions.
-                                                    height: (_bgPlayer.state.height ?? 1080).toDouble(),
-                                                    child: LayerRenderer(
-                                                      layer: show.foregroundLayer,
-                                                      controller: _fgController
+                                              // 2. Middle Layer
+                                              if (show.middleLayer.type != LayerType.none)
+                                                IgnorePointer(
+                                                  ignoring: _selectedLayer != LayerTarget.middle,
+                                                  child: Container(
+                                                    width: _getLayerSize(show.middleLayer).width + 300, 
+                                                    height: _getLayerSize(show.middleLayer).height + 300,
+                                                    alignment: Alignment.center,
+                                                    child: TransformGizmo(
+                                                    transform: show.middleLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0),
+                                                    isCropMode: true,
+                                                    isSelected: _selectedLayer == LayerTarget.middle, // NEW
+                                                    editMode: EditMode.zoom,
+                                                    lockAspect: show.middleLayer.type == LayerType.video ? show.middleLayer.lockAspectRatio : false,
+                                                    onDoubleTap: _fitToMatrix,
+                                                    onUpdate: (newTransform) {
+                                                      if (_selectedLayer == LayerTarget.middle) {
+                                                        final constrained = _constrainTransform(newTransform, show.middleLayer, Size(matW, matH));
+                                                        showState.updateLayer(target: LayerTarget.middle, transform: constrained);
+                                                        _calculateIntersection();
+                                                      }
+                                                    },
+                                                    contentSize: _getLayerSize(show.middleLayer),
+                                                    child: SizedBox(
+                                                      width: _getLayerSize(show.middleLayer).width,
+                                                      height: _getLayerSize(show.middleLayer).height,
+                                                      child: LayerRenderer(
+                                                        layer: show.middleLayer,
+                                                        controller: _mdController,
+                                                        isPlaying: _isPlaying,
+                                                      ),
                                                     ),
                                                   ),
+                                                  ),
                                                 ),
-                                              ),
+
+                                              // 3. Foreground Layer (Top)
+                                              if (show.foregroundLayer.type != LayerType.none)
+                                                IgnorePointer(
+                                                  ignoring: _selectedLayer != LayerTarget.foreground, 
+                                                  child: Container(
+                                                    width: _getLayerSize(show.foregroundLayer).width + 300,
+                                                    height: _getLayerSize(show.foregroundLayer).height + 300,
+                                                    alignment: Alignment.center,
+                                                    child: TransformGizmo(
+                                                    transform: show.foregroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0),
+                                                    isCropMode: true,
+                                                    isSelected: _selectedLayer == LayerTarget.foreground, // NEW
+                                                    editMode: EditMode.zoom,
+                                                    lockAspect: show.foregroundLayer.type == LayerType.video ? show.foregroundLayer.lockAspectRatio : false,
+                                                    onDoubleTap: _fitToMatrix,
+                                                    onUpdate: (newTransform) {
+                                                      if (_selectedLayer == LayerTarget.foreground) {
+                                                        final constrained = _constrainTransform(newTransform, show.foregroundLayer, Size(matW, matH));
+                                                        showState.updateLayer(target: LayerTarget.foreground, transform: constrained);
+                                                        _calculateIntersection();
+                                                      }
+                                                    },
+                                                    contentSize: _getLayerSize(show.foregroundLayer),
+                                                    child: SizedBox(
+                                                      width: _getLayerSize(show.foregroundLayer).width,
+                                                      height: _getLayerSize(show.foregroundLayer).height,
+                                                      child: LayerRenderer(
+                                                        layer: show.foregroundLayer,
+                                                        controller: _fgController,
+                                                        isPlaying: _isPlaying,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  ),
+                                                ),
                                             ],
                                           ),
                                       ),
@@ -712,7 +1062,6 @@ class _VideoTabState extends State<VideoTab> {
                 ),
               ),
             ),
-          ),
 
 
             // Glass Sidebar
@@ -724,200 +1073,95 @@ class _VideoTabState extends State<VideoTab> {
               border: const Border(left: BorderSide(color: Colors.white24)), // Brighter border
               child: SizedBox(
                 width: 320,
-                child: SingleChildScrollView(
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                     // 1. Header
-                     Text("PROJECT LAYERS", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
-                     const SizedBox(height: 12),
-                     
-                     // Layer Toggle
-                     Container(
-                        decoration: BoxDecoration(
-                           color: Colors.white24, // Brighter track
-                           borderRadius: BorderRadius.circular(8),
-                           border: Border.all(color: Colors.white12)
-                        ),
-                        padding: const EdgeInsets.all(4),
-                        child: Row(
-                           children: [
-                              Expanded(
-                                 child: GestureDetector(
-                                    onTap: () => setState(() => _isForegroundSelected = false),
-                                    child: AnimatedContainer(
-                                       duration: const Duration(milliseconds: 200),
-                                       padding: const EdgeInsets.symmetric(vertical: 10), // Taller hit area
-                                       decoration: BoxDecoration(
-                                          color: !_isForegroundSelected ? Colors.blue : Colors.transparent, // Opaque Blue
-                                          borderRadius: BorderRadius.circular(6),
-                                          boxShadow: !_isForegroundSelected ? [
-                                             BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 4, offset: const Offset(0, 2))
-                                          ] : null
-                                       ),
-                                       child: Center(child: Text("BACKGROUND", style: TextStyle(
-                                          color: !_isForegroundSelected ? Colors.white : Colors.white70, 
-                                          fontWeight: FontWeight.bold, 
-                                          fontSize: 12,
-                                          letterSpacing: 1.0
-                                       ))),
-                                    ),
-                                 ),
-                              ),
-                              Expanded(
-                                 child: GestureDetector(
-                                    onTap: () => setState(() => _isForegroundSelected = true),
-                                    child: AnimatedContainer(
-                                       duration: const Duration(milliseconds: 200),
-                                       padding: const EdgeInsets.symmetric(vertical: 10),
-                                       decoration: BoxDecoration(
-                                          color: _isForegroundSelected ? Colors.purpleAccent : Colors.transparent, // Different color for FG for distinction? Or just Blue? Let's use Blue for consistency or Purple for FG differentiation. Let's stick to Blue for now for "Active" state consistency, or maybe an accent color.
-                                          // Actually, let's use the same Active Color (Blue) to imply "Selected".
-                                          // OR: Background = Blue, Foreground = Purple? 
-                                          // Let's use Blue for both to reduce cognitive load.
-                                          color: _isForegroundSelected ? Colors.blue : Colors.transparent, 
-                                          borderRadius: BorderRadius.circular(6),
-                                          boxShadow: _isForegroundSelected ? [
-                                             BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 4, offset: const Offset(0, 2))
-                                          ] : null
-                                       ),
-                                       child: Center(child: Text("FOREGROUND", style: TextStyle(
-                                          color: _isForegroundSelected ? Colors.white : Colors.white70, 
-                                          fontWeight: FontWeight.bold, 
-                                          fontSize: 12,
-                                          letterSpacing: 1.0
-                                       ))),
-                                    ),
-                                 ),
-                              ),
-                           ],
-                        ),
-                     ),
-                     const SizedBox(height: 24),
-                     
-                     Text("${_isForegroundSelected ? "FOREGROUND" : "BACKGROUND"} SETTINGS", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
-                     const SizedBox(height: 4),
-                     
-                     // Opacity Slider
-                     Text("Opacity: ${(_isForegroundSelected ? show.foregroundLayer.opacity : show.backgroundLayer.opacity).toStringAsFixed(2)}", style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                     Slider(
-                        value: _isForegroundSelected ? show.foregroundLayer.opacity : show.backgroundLayer.opacity,
-                        min: 0.0,
-                        max: 1.0,
-                        activeColor: const Color(0xFF90CAF9),
-                        inactiveColor: Colors.white12,
-                        onChanged: (v) {
-                           context.read<ShowState>().updateLayer(
-                              isForeground: _isForegroundSelected, 
-                              opacity: v
-                           );
-                        },
-                     ),
-                     const SizedBox(height: 12),
-                     
-                     // Active Layer Info
-                     Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.05), borderRadius: BorderRadius.circular(8)),
-                        child: Row(
-                           children: [
-                              Icon(
-                                 (_isForegroundSelected ? show.foregroundLayer.type : show.backgroundLayer.type) == LayerType.video ? Icons.movie : Icons.auto_fix_high,
-                                 color: Colors.white70, size: 20
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                   (_isForegroundSelected ? show.foregroundLayer.type : show.backgroundLayer.type) == LayerType.none 
-                                      ? "No Content" 
-                                      : ((_isForegroundSelected ? show.foregroundLayer.path : show.backgroundLayer.path) ?? "Effect"),
-                                   overflow: TextOverflow.ellipsis,
-                                   style: const TextStyle(color: Colors.white, fontSize: 12)
-                                ),
-                              ),
-                              IconButton(
-                                 icon: const Icon(Icons.close, size: 16, color: Colors.white54),
-                                 onPressed: () {
-                                    context.read<ShowState>().updateLayer(
-                                       isForeground: _isForegroundSelected,
-                                       type: LayerType.none,
-                                       path: null,
-                                       effect: null
-                                    );
-                                 },
-                              )
-                           ],
-                        ),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                     // 1. Show Name Header
+                     Padding(
+                       padding: const EdgeInsets.only(bottom: 16.0),
+                       child: Text(
+                         show.name.toUpperCase(), 
+                         style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 1.2),
+                         textAlign: TextAlign.center,
+                       ),
                      ),
                      
-                     const SizedBox(height: 24),
-  
-                     // 2. Primary Actions (Grid)
-                     GridView.count(
-                       crossAxisCount: 2,
-                       crossAxisSpacing: 10,
-                       mainAxisSpacing: 10,
-                       shrinkWrap: true, // Vital for nesting in Column
-                       physics: const NeverScrollableScrollPhysics(),
-                       childAspectRatio: 1.3,
+                     // 2. File Actions (2x2 Grid)
+                     Row(
                        children: [
-                          _buildModernButton(
-                            icon: Icons.upload_file, 
-                            label: "Load Video", 
-                            color: const Color(0xFF90CAF9), // Pastel Blue
-                            onTap: () => _pickVideo(context)
-                          ),
-                          // Only save show (bundle), not individual video export for now in this button?
-                          // Keeping it as "Save Video" (Export) but warning it only exports bg.
-                          _buildModernButton(
-                            icon: Icons.save, 
-                            label: "Export Crop", 
-                            color: const Color(0xFFA5D6A7), // Pastel Green
-                            isEnabled: show.backgroundLayer.path != null,
-                            onTap: () => _exportVideo()
-                          ),
-                          // Full width transfer button? Or just another tile.
-  
+                         Expanded(child: _buildIconFn(Icons.folder_open, "Load Show", Colors.white70, () => _loadShow())),
+                         const SizedBox(width: 8),
+                         Expanded(child: _buildIconFn(Icons.save, "Save Show", Colors.white70, 
+                             show.backgroundLayer.type != LayerType.none || show.middleLayer.type != LayerType.none || show.foregroundLayer.type != LayerType.none 
+                             ? () => _saveShow() : null)),
                        ],
                      ),
-                     const SizedBox(height: 32),
-  
-                     // 2.5 Playback Controls
-                     if (show.mediaFile.isNotEmpty) ...[
-  
-                        GlassContainer(
-                           padding: EdgeInsets.zero,
-                           borderRadius: BorderRadius.circular(50),
-                           child: Row(
-                             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                             children: [
-                               IconButton(
-                                 onPressed: () => player.playOrPause(),
-                                 icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
-                                 color: Colors.white,
-                                 tooltip: _isPlaying ? "Pause" : "Play",
-                               ),
-                               IconButton(
-                                 onPressed: () async {
-                                   await _bgPlayer.seek(Duration.zero);
-                                   await _fgPlayer.seek(Duration.zero);
-                                   await _bgPlayer.pause();
-                                   await _fgPlayer.pause();
-                                 },
-                                 icon: const Icon(Icons.stop),
-                                 color: Colors.redAccent,
-                                 tooltip: "Stop",
-                               ),
-                             ],
-                           ),
-                        )
-                      ],
-                        const SizedBox(height: 24),
-  
-  
-                     // 3. Edit Modes (Simplifed)
-                     if (show.mediaFile.isNotEmpty) ...[
-                        // Intersection Info
+                     const SizedBox(height: 8),
+                     Row(
+                       children: [
+                          Expanded(child: _buildIconFn(Icons.add_to_photos, "Load Media", const Color(0xFF90CAF9), () => _pickVideo(context))),
+                          const SizedBox(width: 8),
+                          Expanded(child: _buildIconFn(Icons.movie_creation, "Render", const Color(0xFFA5D6A7), 
+                             show.backgroundLayer.type != LayerType.none || show.middleLayer.type != LayerType.none || show.foregroundLayer.type != LayerType.none 
+                             ? () => _renderVideo() : null)),
+                       ],
+                     ),
+                     const SizedBox(height: 8), 
+                      Center(
+                        child: TextButton.icon(
+                          onPressed: _initializeShow,
+                          icon: const Icon(Icons.refresh, color: Colors.white38, size: 16),
+                          label: const Text("INITIALIZE SHOW", style: TextStyle(color: Colors.white38, fontSize: 10)),
+                          style: TextButton.styleFrom(
+                             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                             backgroundColor: Colors.white.withOpacity(0.05),
+                          ),
+                        ),
+                      ),
+                     const SizedBox(height: 24),
+
+                     // 3. Layer Controls
+                     Text("LAYERS", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                     const SizedBox(height: 12),
+                     LayerControls(
+                        selectedLayer: _selectedLayer,
+                        onSelectLayer: (target) {
+                           // Check if the target layer has an effect
+                           final show = context.read<ShowState>().currentShow;
+                           if (show != null) {
+                              LayerConfig nextLayer = switch(target) {
+                                 LayerTarget.background => show.backgroundLayer,
+                                 LayerTarget.middle => show.middleLayer,
+                                 LayerTarget.foreground => show.foregroundLayer,
+                              };
+                              
+                              setState(() {
+                                 _selectedLayer = target;
+                                 if (nextLayer.type == LayerType.effect && nextLayer.effect != null) {
+                                     _selectedEffect = nextLayer.effect;
+                                 } else {
+                                     _selectedEffect = null;
+                                 }
+                                 // Recalculate intersection for the newly selected layer
+                                 _calculateIntersection();
+                              });
+                           } else {
+                              setState(() {
+                                _selectedLayer = target;
+                                _selectedEffect = null;
+                                _calculateIntersection();
+                              });
+                           }
+                        },
+                     ),
+                     const SizedBox(height: 24),
+
+                     // 4. Matrix Intersection
+                     if (activeLayer.type != LayerType.none) ...[
                         Container(
                           width: double.infinity,
                           padding: const EdgeInsets.all(12),
@@ -929,7 +1173,7 @@ class _VideoTabState extends State<VideoTab> {
                           child: Column(
                              crossAxisAlignment: CrossAxisAlignment.start,
                              children: [
-                                Text("MATRIX INTERSECTION", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 10, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                                Text("MATRIX INTERSECTION", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 10, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                                 const SizedBox(height: 8),
                                 if (_currentIntersection != null) ...[
                                    _buildInfoRow("X Start", "$_displayX"),
@@ -937,37 +1181,107 @@ class _VideoTabState extends State<VideoTab> {
                                    _buildInfoRow("Y Start", "$_displayY"),
                                    _buildInfoRow("Height", "${_intersectH} px"),
                                 ] else 
-                                   Text("No Intersection / No Matrix", style: TextStyle(color: Colors.redAccent, fontSize: 12)),
+                                   const Text("No Intersection / No Matrix", style: TextStyle(color: Colors.redAccent, fontSize: 12)),
                              ],
                           ),
                         ),
-                        const SizedBox(height: 12),
-  
-                        Row(
-                           children: [
-                              Text("Lock Aspect", style: const TextStyle(color: Colors.white70)),
-                              const Spacer(),
-                              Switch(
-                                value: _lockAspectRatio, 
-                                activeThumbColor:  const Color(0xFF90CAF9),
-                                onChanged: (v) => setState(() => _lockAspectRatio = v)
-                              ),
-                           ],
-                        ),
-                        const Divider(color: Colors.white12, height: 32),
+                        const SizedBox(height: 24),
                      ],
-  
-                     // 4. Effects or Effect Controls
+
+                     // 5. Media Controls (Play/Pause, Stop, Lock)
+                     Text("CONTROLS", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                     const SizedBox(height: 8),
+                     Row(
+                       children: [
+                         // Play/Pause
+                         Expanded(
+                           child: InkWell(
+                             onTap: () {
+                                if (_isPlaying) {
+                                  _bgPlayer.pause(); _mdPlayer.pause(); _fgPlayer.pause();
+                                } else {
+                                  _bgPlayer.play(); _mdPlayer.play(); _fgPlayer.play();
+                                }
+                                setState(() => _isPlaying = !_isPlaying);
+                             },
+                             child: Container(
+                               padding: const EdgeInsets.symmetric(vertical: 12),
+                               decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8)),
+                               child: Icon(_isPlaying ? Icons.pause : Icons.play_arrow, color: Colors.white),
+                             ),
+                           ),
+                         ),
+                         const SizedBox(width: 8),
+                         // Stop
+                         Expanded(
+                           child: InkWell(
+                             onTap: () async {
+                              await _bgPlayer.seek(Duration.zero); await _mdPlayer.seek(Duration.zero); await _fgPlayer.seek(Duration.zero);
+                              await _bgPlayer.pause(); await _mdPlayer.pause(); await _fgPlayer.pause();
+                              setState(() => _isPlaying = false);
+                             },
+                             child: Container(
+                               padding: const EdgeInsets.symmetric(vertical: 12),
+                               decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8)),
+                               child: const Icon(Icons.stop, color: Colors.redAccent),
+                             ),
+                           ),
+                         ),
+                         const SizedBox(width: 8),
+                         // Aspect Ratio Lock
+                         Expanded(
+                           child: InkWell(
+                             onTap: activeLayer.type == LayerType.video ? () {
+                                context.read<ShowState>().updateLayer(
+                                  target: _selectedLayer,
+                                  lockAspectRatio: !activeLayer.lockAspectRatio
+                                );
+                             } : null,
+                             child: Container(
+                               padding: const EdgeInsets.symmetric(vertical: 12),
+                               decoration: BoxDecoration(
+                                 color: activeLayer.lockAspectRatio && activeLayer.type == LayerType.video ? const Color(0xFF1565C0) : Colors.white10, 
+                                 borderRadius: BorderRadius.circular(8),
+                                 border: Border.all(color: activeLayer.type == LayerType.video ? Colors.transparent : Colors.transparent)
+                               ),
+                               child: Icon(
+                                 activeLayer.lockAspectRatio ? Icons.lock : Icons.lock_open, 
+                                 color: activeLayer.type == LayerType.video ? (activeLayer.lockAspectRatio ? Colors.white : Colors.white54) : Colors.white24,
+                                 size: 20
+                               ),
+                             ),
+                           ),
+                         ),
+                       ],
+                     ),
+                     const SizedBox(height: 24),
+
+                     // 6. Effects
                      if (_selectedEffect != null) ...[
-                        Text("EFFECT SETTINGS: ${_selectedEffect!.name.toUpperCase()}", style: const TextStyle(color: Color(0xFFA5D6A7), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                             Text("EFFECT SETTINGS: ${_selectedEffect!.name.toUpperCase()}", style: const TextStyle(color: Color(0xFFA5D6A7), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                             InkWell(
+                               onTap: () {
+                                  // Back to library? Or just clear effect?
+                                  // User might want to switch effects.
+                                  // Let's clear selection to show library (but keep effect active on layer until changed?)
+                                  // Usually "Back" means show list.
+                                  setState(() {
+                                     _selectedEffect = null;
+                                  });
+                               },
+                               child: const Text("CHANGE", style: TextStyle(color: Colors.white54, fontSize: 10, decoration: TextDecoration.underline)),
+                             )
+                          ],
+                        ),
                         const SizedBox(height: 12),
                          
-                        // Removed Expanded
                         Column(
                              crossAxisAlignment: CrossAxisAlignment.start,
                              children: [
                                  ...activeParams.keys.map((key) {
-                                    // Guard: ensure key exists (redundant if iterating keys, but safe)
                                     if (!activeParams.containsKey(key)) return const SizedBox.shrink();
 
                                     final def = EffectService.effects.firstWhere((e) => e.type == _selectedEffect);
@@ -988,7 +1302,7 @@ class _VideoTabState extends State<VideoTab> {
                                              final newParams = Map<String, double>.from(activeParams);
                                              newParams[key] = v;
                                              context.read<ShowState>().updateLayer(
-                                                isForeground: _isForegroundSelected, 
+                                                target: _selectedLayer, 
                                                 params: newParams
                                              );
                                           },
@@ -996,64 +1310,70 @@ class _VideoTabState extends State<VideoTab> {
                                       ],
                                     );
                                }),
-                               const SizedBox(height: 20),
-                               _buildModernButton(
-                                 icon: Icons.check, 
-                                 label: "Apply & Close", 
-                                 color: const Color(0xFF90CAF9),
-                                 onTap: () => setState(() => _selectedEffect = null), // Or just deselect to view
-                               ),
                              ],
                            ),
                      ] else ...[
-                         Text("EFFECTS LIBRARY", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                         Text("EFFECTS LIBRARY", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                          const SizedBox(height: 12),
-                         // Removed Expanded and added shrinkWrap
-                         ListView(
+                         GridView.builder(
                             shrinkWrap: true,
                             physics: const NeverScrollableScrollPhysics(),
-                            children: EffectType.values.map((e) {
-                               return Container(
-                                 margin: const EdgeInsets.only(bottom: 8),
-                                 decoration: BoxDecoration(
-                                   color: Colors.white.withValues(alpha: 0.05),
-                                   borderRadius: BorderRadius.circular(8),
-                                 ),
-                                 child: ListTile(
-                                   leading: Icon(Icons.auto_fix_high, color: Colors.white70),
-                                   title: Text(e.name.toUpperCase(), style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                               crossAxisCount: 3,
+                               childAspectRatio: 0.8,
+                               crossAxisSpacing: 8,
+                               mainAxisSpacing: 8,
+                            ),
+                            itemCount: EffectService.effects.length,
+                            itemBuilder: (context, index) {
+                               final e = EffectService.effects[index];
+                               return InkWell(
                                   onTap: () {
-                                    // Apply Effect to Active Layer
                                     context.read<ShowState>().updateLayer(
-                                       isForeground: _isForegroundSelected,
+                                       target: _selectedLayer,
                                        type: LayerType.effect,
-                                       effect: e,
+                                       effect: e.type,
                                        opacity: 1.0, 
-                                       params: EffectService.effects.firstWhere((eff) => eff.type == e).defaultParams
+                                       params: e.defaultParams
                                     );
-                                    
-                                    // Also set local state for editing?
-                                    // Actually, we should probably read from ShowState
-                                    // But for now keeping local override logic or removing it? 
-                                    // Let's rely on ShowState.
-                                    
                                     setState(() {
-                                      _selectedEffect = e;
-                                      // _loadEffectDefaults(e); // Handled by updateLayer defaultParams
+                                      _selectedEffect = e.type;
+                                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                                         if (mounted) {
+                                             // Force fit if switching to effect? Logic says effects stretch.
+                                             // _fitToMatrix(); 
+                                             // Don't auto-reset unless empty?
+                                         }
+                                      });
                                     });
                                   },
-                                ),
-                              );
-                           }).toList(),
+                                  child: Container(
+                                     decoration: BoxDecoration(
+                                        color: Colors.white10,
+                                        borderRadius: BorderRadius.circular(8),
+                                        border: Border.all(color: Colors.white12)
+                                     ),
+                                     child: Column(
+                                       mainAxisAlignment: MainAxisAlignment.center,
+                                       children: [
+                                          Icon(e.icon, size: 24, color: Colors.white70),
+                                          const SizedBox(height: 8),
+                                          Text(e.name, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white70, fontSize: 10), maxLines: 2, overflow: TextOverflow.ellipsis),
+                                       ],
+                                     ),
+                                  ),
+                               );
+                            },
                          ),
-
-                   ],
+                    ],
 
                   ],
-
+                ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ),
             ),
           ],
         );
@@ -1068,13 +1388,18 @@ class _VideoTabState extends State<VideoTab> {
     final show = context.read<ShowState>().currentShow;
     if (show == null) return;
     
-    final activeLayer = _isForegroundSelected ? show.foregroundLayer : show.backgroundLayer;
+    LayerConfig activeLayer = switch(_selectedLayer) {
+       LayerTarget.background => show.backgroundLayer,
+       LayerTarget.middle => show.middleLayer,
+       LayerTarget.foreground => show.foregroundLayer,
+    };
     final transform = activeLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
 
-    final width = _bgPlayer.state.width;
-    final height = _bgPlayer.state.height;
+    final size = _resolveLayerSize(show, activeLayer);
+    final width = size.width;
+    final height = size.height;
     
-    if (show.fixtures.isEmpty || width == null || height == null) {
+    if (show.fixtures.isEmpty || width <= 0 || height <= 0) {
        if (_currentIntersection != null) {
          setState(() {
             _currentIntersection = null;
@@ -1173,91 +1498,9 @@ class _VideoTabState extends State<VideoTab> {
              _intersectH = 0;
              _displayX = 0;
              _displayY = 0;
-          });
-     double minMy = double.infinity, maxMy = double.negativeInfinity;
-     
-     for (var f in show.fixtures) {
-        for (var p in f.pixels) {
-           double px = p.x * gridSize;
-           double py = p.y * gridSize;
-           if (px < minMx) minMx = px;
-           if (px > maxMx) maxMx = px;
-           if (py < minMy) minMy = py;
-           if (py > maxMy) maxMy = py;
+            });
         }
-     }
-     maxMx += gridSize; 
-     maxMy += gridSize;
-     
-     double matW = maxMx - minMx;
-     double matH = maxMy - minMy;
-     
-     // 2. Video Bounds (Logic Space) relative to Matrix Center
-     // Matrix is centered at (0,0) visually.
-     // Video is transformed relative to (0,0).
-     
-     final t = show.backgroundLayer.transform ?? MediaTransform(scaleX: 1, scaleY: 1, translateX: 0, translateY: 0, rotation: 0);
-     
-     // Video Original Size
-     final vidW = width.toDouble();
-     final vidH = height.toDouble();
-     
-     // Scaled Size
-     final scaledW = vidW * t.scaleX;
-     final scaledH = vidH * t.scaleY;
-     
-     // TopLeft of Video relative to Center (0,0)
-     // Center is at t.translateX, t.translateY
-     final vidLeft = t.translateX - (scaledW / 2);
-     final vidTop = t.translateY - (scaledH / 2);
-     
-     Rect videoRect = Rect.fromLTWH(vidLeft, vidTop, scaledW, scaledH);
-     
-     // Matrix Rect relative to Center (0,0)
-     // Matrix Center is (minMx + maxMx)/2, (minMy + maxMy)/2
-     // But we draw Matrix so that it fits in the container centered.
-     // Matrix spans from -matW/2 to matW/2 relative to center.
-     
-     Rect matrixRect = Rect.fromCenter(center: Offset.zero, width: matW, height: matH);
-     
-     // 3. Intersect
-     Rect intersect = matrixRect.intersect(videoRect);
-     
-     if (intersect.width > 0 && intersect.height > 0) {
-        // Calculate Grid Resolution
-        int w = (intersect.width / gridSize).round();
-        int h = (intersect.height / gridSize).round();
-        
-        // Calculate Display Coordinates (Bottom-Left Origin)
-        // X Start: Distance from Left Edge
-        double matLeft = matrixRect.left;
-        double xDist = intersect.left - matLeft;
-        int dX = (xDist / gridSize).round();
-
-        // Y Start: Distance from Bottom Edge (Flutter Y grows down)
-        // Matrix Bottom (Max Y) - Intersect Bottom (Max Y of intersection)
-        double matBottom = matrixRect.bottom;
-        double yDist = matBottom - intersect.bottom; 
-        int dY = (yDist / gridSize).round();
-
-        setState(() {
-           _currentIntersection = intersect;
-           _intersectW = w;
-           _intersectH = h;
-           _displayX = dX;
-           _displayY = dY;
-        });
-     } else {
-        if (_currentIntersection != null) {
-           setState(() {
-             _currentIntersection = null;
-              _intersectW = 0;
-              _intersectH = 0;
-              _displayX = 0;
-              _displayY = 0;
-           });
-        }
-     }
+    }
   }
 
   // MARK: - UI Helpers
@@ -1281,7 +1524,7 @@ class _VideoTabState extends State<VideoTab> {
        final def = EffectService.effects.firstWhere((e) => e.type == type);
        // Update ShowState directly
        context.read<ShowState>().updateLayer(
-          isForeground: _isForegroundSelected, 
+          target: _selectedLayer, 
           params: def.defaultParams
        );
        setState(() {
@@ -1310,6 +1553,77 @@ class _VideoTabState extends State<VideoTab> {
           ],
         ),
       );
+  }
+
+    // Constraint helper
+    // Constraint helper
+  MediaTransform _constrainTransform(MediaTransform t, LayerConfig layer, Size matrixSize) {
+     final layerSize = _resolveLayerSize(context.read<ShowState>().currentShow!, layer);
+     
+     // 1. Clamp Scale (Max Size = Matrix Size)
+     // Ensure video/effect doesn't exceed matrix bounds
+     
+     double scaleX = t.scaleX;
+     double scaleY = t.scaleY;
+     
+     final maxSX = matrixSize.width / layerSize.width;
+     final maxSY = matrixSize.height / layerSize.height;
+     
+     bool isLocked = layer.type == LayerType.video ? layer.lockAspectRatio : false; // Effects unlocked
+     
+     if (isLocked) {
+         // If locked, we must maintain aspect ratio.
+         // If EITHER dimension exceeds limit, we clamp BOTH.
+         // Wait. TransformGizmo drives the scale.
+         // If current scale > max, we clamp.
+         // We use the most restrictive limit.
+         // Actually, if we hit X limit, we clamp X, and Y follows.
+         
+         double factor = 1.0;
+         if (scaleX > maxSX) factor = maxSX / scaleX;
+         if (scaleY * factor > maxSY) factor = (maxSY / scaleY) * factor; // Re-clamp if Y still too big
+         
+         // Only apply if factor < 1 (reduction)
+         // Wait. If scale is valid, factor is 1.
+         // If scale is too big, factor < 1.
+         // We also don't want to force it to be MAX if user wants SMALL.
+         // So we only clamp MAX.
+         
+         if (factor < 1.0) {
+             scaleX *= factor;
+             scaleY *= factor;
+         }
+     } else {
+         // Unlocked: Clamp independently
+         if (scaleX > maxSX) scaleX = maxSX;
+         if (scaleY > maxSY) scaleY = maxSY;
+     }
+
+     // 2. Clamp Translation (Pan)
+     // Re-calc dimensions with clamped scale
+     double vidW = layerSize.width * scaleX;
+     double vidH = layerSize.height * scaleY;
+     
+     // Limit = Half of the difference
+     double limitX = (matrixSize.width - vidW).abs() / 2;
+     double limitY = (matrixSize.height - vidH).abs() / 2;
+     
+     double tx = t.translateX;
+     double ty = t.translateY;
+     
+     if (tx < -limitX) tx = -limitX;
+     if (tx > limitX) tx = limitX;
+     if (ty < -limitY) ty = -limitY;
+     if (ty > limitY) ty = limitY;
+     
+     return MediaTransform(
+       scaleX: scaleX,
+       scaleY: scaleY,
+       translateX: tx,
+       translateY: ty,
+       rotation: t.rotation,
+       crop: t.crop
+     );
   }
 }
 

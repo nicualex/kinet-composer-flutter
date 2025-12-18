@@ -5,12 +5,16 @@ import 'package:flutter/material.dart';
 enum EffectType {
   rainbow,
   noise,
+  black,
+  clouds,
+  galaxies,
 }
 
 class EffectDef {
   final String name;
   final EffectType type;
-  final IconData icon;
+  final IconData icon; // Used as fallback or overlay
+  final String? thumbnailAsset; // Prepare for asset text/image
   final Map<String, double> defaultParams;
   final Map<String, double> minParams;
   final Map<String, double> maxParams;
@@ -19,6 +23,7 @@ class EffectDef {
     required this.name,
     required this.type,
     required this.icon,
+    this.thumbnailAsset,
     required this.defaultParams,
     required this.minParams,
     required this.maxParams,
@@ -43,6 +48,30 @@ class EffectService {
       minParams: {'intensity': 0.0},
       maxParams: {'intensity': 1.0},
     ),
+    EffectDef(
+      name: 'Blackout',
+      type: EffectType.black,
+      icon: Icons.check_box_outline_blank,
+      defaultParams: {},
+      minParams: {},
+      maxParams: {},
+    ),
+    EffectDef(
+      name: 'Drifting Clouds',
+      type: EffectType.clouds,
+      icon: Icons.cloud,
+      defaultParams: {'density': 0.5, 'speed': 0.2},
+      minParams: {'density': 0.1, 'speed': 0.1},
+      maxParams: {'density': 1.0, 'speed': 2.0},
+    ),
+    EffectDef(
+      name: 'Galaxy Night',
+      type: EffectType.galaxies,
+      icon: Icons.auto_awesome,
+      defaultParams: {'density': 0.3, 'speed': 0.1},
+      minParams: {'density': 0.1, 'speed': 0.0},
+      maxParams: {'density': 1.0, 'speed': 1.0},
+    ),
   ];
 
   static CustomPainter getPainter(EffectType type, Map<String, double> params, double time) {
@@ -51,6 +80,12 @@ class EffectService {
         return _RainbowPainter(time, params['speed'] ?? 1.0, params['scale'] ?? 1.0);
       case EffectType.noise:
         return _NoisePainter(time, params['intensity'] ?? 0.5);
+      case EffectType.black:
+        return _BlackPainter();
+      case EffectType.clouds:
+        return _CloudsPainter(time, params['density'] ?? 0.5, params['speed'] ?? 0.2);
+      case EffectType.galaxies:
+        return _GalaxiesPainter(time, params['density'] ?? 0.3, params['speed'] ?? 0.1);
     }
   }
 
@@ -89,6 +124,24 @@ class EffectService {
         
         // 't+u' means temporal variance (changes every frame) + uniform noise
         return "color=c=black:s=1920x1080,noise=alls=$val:allf=t+u";
+        
+      case EffectType.black:
+        return "color=c=black:s=1920x1080";
+        
+      case EffectType.clouds:
+        // Approximation using fractal noise (turbulence) if available, or just blurred noise
+        // Using 'noise' with low freq isn't easy in vanilla ffmpeg without complex filterchains.
+        // We'll use a placeholder 'testsrc' with some processing or just simple noise for now.
+        // User asked for "white clouds passing over blue sky".
+        // simple: color=blue, noise added?
+        // Let's try geq with moving perlin-ish approximation (sine sums)
+        return "color=c=skyblue:s=1920x1080,noise=alls=20:allf=t+u"; // Fallback
+        
+      case EffectType.galaxies:
+        // "Galaxies moving slowly over night sky"
+        // Black bg, slow white dots (stars)?
+        // Noise with high contrast?
+        return "color=c=black:s=1920x1080,noise=alls=50:allf=t+u,eq=contrast=20"; // Stars
     }
   }
 }
@@ -247,22 +300,8 @@ class _NoisePainter extends CustomPainter {
        canvas.drawColor(Colors.black, BlendMode.src);
        return;
     }
-
-    // Optimization: Draw coarse noise
-    final Paint paint = Paint();
     const double blockSize = 2.0;
 
-    // Better: Draw points? `canvas.drawPoints`.
-    
-    paint.color = Colors.white; // Or random gray?
-    paint.strokeWidth = blockSize;
-    paint.strokeCap = StrokeCap.square;
-    
-    // We want general grayscale noise.
-    // CustomPainter limitation: single color per drawPoints call.
-    // We can do 3 passes: Dark Gray, Gray, White?
-    
-    // Pass 1: Dark
     _drawNoiseLayer(canvas, size, blockSize, intensity, Colors.white10);
     // Pass 2: Med
     _drawNoiseLayer(canvas, size, blockSize, intensity * 0.5, Colors.white30);
@@ -294,4 +333,90 @@ class _NoisePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_NoisePainter oldDelegate) => true; 
+}
+
+class _BlackPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawColor(Colors.black, BlendMode.src);
+  }
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+class _CloudsPainter extends CustomPainter {
+  final double time;
+  final double density;
+  final double speed;
+  
+  _CloudsPainter(this.time, this.density, this.speed);
+  
+  @override
+  void paint(Canvas canvas, Size size) {
+     // Blue Sky
+     canvas.drawColor(Colors.lightBlue[300]!, BlendMode.src);
+     
+     // procedural cloud blobs
+     final paint = Paint()..color = Colors.white.withOpacity(0.4)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 20);
+     final rng = Random(42); // Seeded for consistence layout, moves by time
+     
+     int count = (20 * density).toInt();
+     for(int i=0; i<count; i++) {
+        double w = 100 + rng.nextDouble() * 200;
+        double h = 50 + rng.nextDouble() * 100;
+        double y = rng.nextDouble() * size.height;
+        
+        // Move X
+        double startX = rng.nextDouble() * size.width;
+        double x = (startX + time * speed * 20) % (size.width + 400) - 200;
+        
+        canvas.drawOval(Rect.fromLTWH(x, y, w, h), paint);
+     }
+  }
+  @override
+  bool shouldRepaint(_CloudsPainter oldDelegate) => true;
+}
+
+class _GalaxiesPainter extends CustomPainter {
+  final double time;
+  final double density;
+  final double speed;
+  
+  _GalaxiesPainter(this.time, this.density, this.speed);
+  
+  @override
+  void paint(Canvas canvas, Size size) {
+     canvas.drawColor(Colors.black, BlendMode.src);
+     
+     // Stars
+     final paint = Paint()..color = Colors.white;
+     final rng = Random(123);
+     
+     // Background stars (static-ish)
+     int count = (500 * density).toInt();
+     List<Offset> stars = [];
+     for(int i=0; i<count; i++) {
+        stars.add(Offset(rng.nextDouble() * size.width, rng.nextDouble() * size.height));
+     }
+     paint.strokeWidth = 1.0;
+     canvas.drawPoints(ui.PointMode.points, stars, paint);
+     
+     // Moving Galaxies (Blobs/Spirals)
+     paint.strokeWidth = 0;
+     paint.color = Colors.purple.withOpacity(0.3);
+     paint.maskFilter = const MaskFilter.blur(BlurStyle.normal, 30);
+     
+     int galCount = (5 * density).toInt() + 1;
+     for(int i=0; i<galCount; i++) {
+         double w = 200; 
+         double h = 150;
+         double y = rng.nextDouble() * size.height;
+         double startX = rng.nextDouble() * size.width;
+         double x = (startX + time * speed * 10) % (size.width + 400) - 200;
+         
+         canvas.drawOval(Rect.fromLTWH(x, y, w, h), paint);
+     }
+  }
+  @override
+  bool shouldRepaint(_GalaxiesPainter oldDelegate) => true;
 }

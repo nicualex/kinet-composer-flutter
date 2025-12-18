@@ -47,6 +47,10 @@ class MediaTransform {
     this.crop,
   });
 
+  factory MediaTransform.identity() {
+    return MediaTransform(scaleX: 1.0, scaleY: 1.0, translateX: 0.0, translateY: 0.0, rotation: 0.0);
+  }
+
   factory MediaTransform.fromJson(Map<String, dynamic> json) {
     return MediaTransform(
       scaleX: (json['scaleX'] as num).toDouble(),

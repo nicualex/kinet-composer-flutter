@@ -8,7 +8,12 @@ import 'package:path/path.dart' as p;
 import '../models/show_manifest.dart';
 import '../models/layer_config.dart';
 import '../models/media_transform.dart';
+import '../models/layer_config.dart';
+import '../models/media_transform.dart';
 import '../services/effect_service.dart';
+
+// Export LayerTarget for convenience
+export '../models/layer_config.dart' show LayerTarget;
 
 class ShowState extends ChangeNotifier {
   ShowManifest? _currentShow;
@@ -57,6 +62,9 @@ class ShowState extends ChangeNotifier {
          )
       ],
       settings: PlaybackSettings(loop: true, autoPlay: true),
+      backgroundLayer: const LayerConfig(),
+      middleLayer: const LayerConfig(),
+      foregroundLayer: const LayerConfig(),
     );
     _currentFile = null;
     _isModified = true; 
@@ -94,6 +102,13 @@ class ShowState extends ChangeNotifier {
     }
   }
 
+  void loadManifest(ShowManifest show) {
+    _currentShow = show;
+    _currentFile = null; // Loaded from raw manifest, file unknown unless set via saving
+    _isModified = false;
+    notifyListeners();
+  }
+
   Future<void> saveShow() async {
     if (_currentShow == null) return;
 
@@ -128,8 +143,17 @@ class ShowState extends ChangeNotifier {
      notifyListeners();
   }
 
+  // Legacy support or quick access for Background Video
+  void updateMedia(String path) {
+    updateLayer(target: LayerTarget.background, type: LayerType.video, path: path);
+  }
+
   void updateLayer({
-    required bool isForeground,
+    // Replacing isForeground with target
+    LayerTarget target = LayerTarget.background,
+    // Helper for boolean backward compatibility if needed, but safer to enforce target
+    bool? isForeground, 
+    
     LayerType? type,
     String? path,
     EffectType? effect,
@@ -138,10 +162,21 @@ class ShowState extends ChangeNotifier {
 
     bool? isVisible,
     MediaTransform? transform,
+    bool? lockAspectRatio,
   }) {
     if (_currentShow == null) return;
+    
+    // Backward compatibility wrapper
+    final effectiveTarget = isForeground != null 
+       ? (isForeground ? LayerTarget.foreground : LayerTarget.background)
+       : target;
 
-    final currentLayer = isForeground ? _currentShow!.foregroundLayer : _currentShow!.backgroundLayer;
+    LayerConfig currentLayer;
+    switch (effectiveTarget) {
+       case LayerTarget.background: currentLayer = _currentShow!.backgroundLayer; break;
+       case LayerTarget.middle: currentLayer = _currentShow!.middleLayer; break;
+       case LayerTarget.foreground: currentLayer = _currentShow!.foregroundLayer; break;
+    }
 
     final newLayer = currentLayer.copyWith(
       type: type,
@@ -151,11 +186,12 @@ class ShowState extends ChangeNotifier {
       opacity: opacity,
       isVisible: isVisible,
       transform: transform,
+      lockAspectRatio: lockAspectRatio,
     );
 
     // Sync legacy mediaFile if updating background video
     String newMediaFile = _currentShow!.mediaFile;
-    if (!isForeground && path != null) {
+    if (effectiveTarget == LayerTarget.background && path != null) {
       newMediaFile = path;
     }
 
@@ -165,8 +201,9 @@ class ShowState extends ChangeNotifier {
       mediaFile: newMediaFile,
       fixtures: _currentShow!.fixtures,
       settings: _currentShow!.settings,
-      backgroundLayer: isForeground ? _currentShow!.backgroundLayer : newLayer,
-      foregroundLayer: isForeground ? newLayer : _currentShow!.foregroundLayer,
+      backgroundLayer: effectiveTarget == LayerTarget.background ? newLayer : _currentShow!.backgroundLayer,
+      middleLayer: effectiveTarget == LayerTarget.middle ? newLayer : _currentShow!.middleLayer,
+      foregroundLayer: effectiveTarget == LayerTarget.foreground ? newLayer : _currentShow!.foregroundLayer,
     );
     _isModified = true;
     notifyListeners();
@@ -181,6 +218,7 @@ class ShowState extends ChangeNotifier {
         fixtures: _currentShow!.fixtures,
         settings: _currentShow!.settings,
         backgroundLayer: _currentShow!.backgroundLayer,
+        middleLayer: _currentShow!.middleLayer,
         foregroundLayer: _currentShow!.foregroundLayer,
       );
       _isModified = true;
@@ -190,13 +228,6 @@ class ShowState extends ChangeNotifier {
 
   // updateTransform is removed. Use updateLayer(transform: ...) instead.
 
-  // Legacy support or quick access for Background Video
-  void updateMedia(String path) {
-     updateLayer(isForeground: false, type: LayerType.video, path: path);
-  }
-
-
-
   void setMediaAndTransform(String mediaPath, MediaTransform? transform) {
     if (_currentShow != null) {
        _currentShow = ShowManifest(
@@ -205,6 +236,9 @@ class ShowState extends ChangeNotifier {
         mediaFile: mediaPath,
         fixtures: _currentShow!.fixtures,
         settings: _currentShow!.settings,
+        backgroundLayer: _currentShow!.backgroundLayer,
+        middleLayer: _currentShow!.middleLayer,
+        foregroundLayer: _currentShow!.foregroundLayer,
       );
       _isModified = true;
       notifyListeners();
@@ -237,6 +271,9 @@ class ShowState extends ChangeNotifier {
         mediaFile: _currentShow!.mediaFile,
         fixtures: [importedFixture], // Replace existing fixtures with the imported one
         settings: _currentShow!.settings,
+        backgroundLayer: _currentShow!.backgroundLayer,
+        middleLayer: _currentShow!.middleLayer,
+        foregroundLayer: _currentShow!.foregroundLayer,
       );
       _isModified = true;
       notifyListeners();
@@ -274,6 +311,9 @@ class ShowState extends ChangeNotifier {
       mediaFile: _currentShow!.mediaFile,
       fixtures: newFixtures,
       settings: _currentShow!.settings,
+      backgroundLayer: _currentShow!.backgroundLayer,
+      middleLayer: _currentShow!.middleLayer,
+      foregroundLayer: _currentShow!.foregroundLayer,
     );
     _isModified = true;
     notifyListeners();
@@ -307,21 +347,29 @@ class ShowState extends ChangeNotifier {
            }
         }
 
-        // 3. Add Media Files (Foreground)
+        // 3. Add Media Files (Middle)
+        if (_currentShow!.middleLayer.type == LayerType.video && 
+            _currentShow!.middleLayer.path != null && 
+            _currentShow!.middleLayer.path!.isNotEmpty) {
+           
+           final file = File(_currentShow!.middleLayer.path!);
+           if (await file.exists()) {
+             encoder.addFile(file, 'middle${p.extension(_currentShow!.middleLayer.path!)}');
+           }
+        }
+
+        // 4. Add Media Files (Foreground)
         if (_currentShow!.foregroundLayer.type == LayerType.video && 
             _currentShow!.foregroundLayer.path != null && 
             _currentShow!.foregroundLayer.path!.isNotEmpty) {
            
-           final mediaPath = _currentShow!.foregroundLayer.path!;
-           final mediaFile = File(mediaPath);
-           if (await mediaFile.exists()) {
-              final ext = p.extension(mediaPath);
-              final filename = 'foreground$ext';
-              encoder.addFile(mediaFile, filename);
+           final file = File(_currentShow!.foregroundLayer.path!);
+           if (await file.exists()) {
+             encoder.addFile(file, 'foreground${p.extension(_currentShow!.foregroundLayer.path!)}');
            }
         }
         
-        // 4. Create Export Manifest (Updates paths to relative)
+        // 5. Create Modified Manifest
         final exportManifest = ShowManifest(
           version: _currentShow!.version,
           name: _currentShow!.name,
@@ -330,6 +378,9 @@ class ShowState extends ChangeNotifier {
           settings: _currentShow!.settings,
           backgroundLayer: _currentShow!.backgroundLayer.copyWith(
              path: _currentShow!.backgroundLayer.path != null ? 'background${p.extension(_currentShow!.backgroundLayer.path!)}' : null
+          ),
+          middleLayer: _currentShow!.middleLayer.copyWith(
+             path: _currentShow!.middleLayer.path != null ? 'middle${p.extension(_currentShow!.middleLayer.path!)}' : null
           ),
           foregroundLayer: _currentShow!.foregroundLayer.copyWith(
              path: _currentShow!.foregroundLayer.path != null ? 'foreground${p.extension(_currentShow!.foregroundLayer.path!)}' : null
