@@ -766,8 +766,9 @@ class _VideoTabState extends State<VideoTab> {
 
     if (width <= 0 || height <= 0) return;
     
-    // Force Aspect Ratio Lock to TRUE on Reset/Fit
-    context.read<ShowState>().updateLayer(target: _selectedLayer, lockAspectRatio: true);
+    // Force Aspect Ratio Lock to TRUE on Reset/Fit ONLY for Videos
+    bool shouldLock = activeLayer.type != LayerType.effect;
+    context.read<ShowState>().updateLayer(target: _selectedLayer, lockAspectRatio: shouldLock);
     
     // 1. Calculate Matrix Bounds in "Pixel" space
     final bounds = _calculateMatrixBounds(show);
@@ -957,8 +958,7 @@ class _VideoTabState extends State<VideoTab> {
      for (var f in show.fixtures) {
          double fw = f.width * kGridSize;
          double fh = f.height * kGridSize;
-         double fw = f.width * kGridSize;
-         double fh = f.height * kGridSize;
+
          
          double cx = fw / 2.0;
          double cy = fh / 2.0;
@@ -1453,6 +1453,7 @@ class _VideoTabState extends State<VideoTab> {
                                                effect: e.type,
                                                opacity: 1.0, 
                                                params: e.defaultParams,
+                                               lockAspectRatio: false, // Allow Stretch for Effects
                                                transform: MediaTransform(
                                                   scaleX: scaleX, 
                                                   scaleY: scaleY, 
