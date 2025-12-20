@@ -63,7 +63,7 @@ class _ShowsTabState extends State<ShowsTab> {
 
   // NEW: Effects State
   EffectType? _selectedEffect;
-  Map<String, double> _effectParams = {};
+  Map<String, dynamic> _effectParams = {};
   
   final GlobalKey _previewKey = GlobalKey(); // For Snapshot
   
@@ -599,7 +599,10 @@ class _ShowsTabState extends State<ShowsTab> {
       builder: (context, showState, child) {
         final show = showState.currentShow;
         if (show == null) {
-          return const Center(child: Text("Create or Load a Show first"));
+          return Container(
+            color: Colors.purple.withValues(alpha: 0.5), // DEBUG: Purple
+            child: const Center(child: Text("DEBUG: No Show Loaded. Please Create or Load a Show.", style: TextStyle(color: Colors.white, fontSize: 30))),
+          );
         }
 
         _syncPlayer(show.mediaFile);
@@ -617,428 +620,301 @@ class _ShowsTabState extends State<ShowsTab> {
         // Debug Log
         // debugPrint("Build: Media=${show.mediaFile}, T=${transform.scaleX}x${transform.scaleY}, PlayerW=${player.state.width}");
 
-        return Scaffold(
-           backgroundColor: Colors.transparent,
-           body: Row(
+        return Container(
+           color: Colors.black,
+           child: Row(
              crossAxisAlignment: CrossAxisAlignment.stretch,
              children: [
-               Expanded(
-                 child: Container(
-                   color: Colors.black87,
-                   child: RepaintBoundary(
-                     key: _previewKey,
-                     child: ClipRect(
-                    child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      // UNIFIED LAYOUT
-                      LayoutBuilder(
-                        builder: (context, constraints) {
-                           // 1. Calculate Matrix Bounds (Logical 10.0 scale)
-                           double minX = double.infinity, maxX = double.negativeInfinity;
-                           double minY = double.infinity, maxY = double.negativeInfinity;
-                           const double gridSize = 10.0;
-                           bool hasFixtures = show.fixtures.isNotEmpty;
-                           
-                           if (hasFixtures) {
-                             for (var f in show.fixtures) {
-                               for (var p in f.pixels) {
-                                   double px = p.x * gridSize;
-                                   double py = p.y * gridSize;
-                                   if (px < minX) minX = px;
-                                   if (px > maxX) maxX = px;
-                                   if (py < minY) minY = py;
-                                   if (py > maxY) maxY = py;
-                               }
-                             }
-                             // Add grid block size
-                             maxX += gridSize; 
-                             maxY += gridSize;
-                           } else {
-                             // Default Space if no matrix
-                             minX = 0; maxX = 1000;
-                             minY = 0; maxY = 1000;
-                           }
-                           
-                           double matW = maxX - minX;
-                           double matH = maxY - minY;
-                           
-                           if (matW <= 0) matW = 1000;
-                           if (matH <= 0) matH = 1000;
-                           debugPrint("World Bounds: ${matW}x${matH}");
-
-                           // REMOVED FittedBox for Debugging
-                           return Center(
-                             child: Transform.scale(
-                               scale: 0.5,
-                               child: Container(
-                               width: matW,
-                               height: matH,
-                               color: Colors.transparent, // "World" Canvas
-                               child: Listener(
-                                 onPointerDown: (_) => debugPrint("Layer 0: World Stack Hit"),
-                                 child: Stack(
-                                  clipBehavior: Clip.none,
-                                  alignment: Alignment.center,
+               
+                // Glass Sidebar (Moved to Left)
+                GlassContainer(
+                  padding: const EdgeInsets.all(20.0),
+                  tint: Colors.black, // Dark panel
+                  opacity: 0.95,       // Almost opaque for visibility
+                  borderRadius: const BorderRadius.only(topRight: Radius.circular(16), bottomRight: Radius.circular(16)), // Changed corners
+                  border: const Border(right: BorderSide(color: Colors.white12)), // Changed border side
+                  child: SizedBox(
+                    width: 320,
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(20.0).copyWith(bottom: 170), // Prevent bottom overflow
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                         // 1. Header
+                         Text("COMPOSER", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                         const SizedBox(height: 4),
+                         
+                         // Project Name & Status
+                         Row(
+                           children: [
+                             Expanded(child: Text(show.name, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)),
+                             IconButton(
+                               icon: const Icon(Icons.edit, size: 16, color: Colors.white54),
+                               onPressed: () async {
+                                   final nameController = TextEditingController(text: show.name);
+                                   final newName = await showDialog<String>(
+                                     context: context,
+                                     builder: (context) => AlertDialog(
+                                       title: const Text("Rename Show"),
+                                       content: TextField(
+                                         controller: nameController,
+                                         decoration: const InputDecoration(labelText: "Show Name"),
+                                         autofocus: true,
+                                       ),
+                                       actions: [
+                                         TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+                                         ElevatedButton(onPressed: () => Navigator.pop(context, nameController.text), child: const Text("Save")),
+                                       ],
+                                     ),
+                                   );
+                                   if (newName != null && newName.isNotEmpty) {
+                                     showState.updateName(newName);
+                                   }
+                               },
+                             )
+                           ],
+                         ),
+                         Text(showState.isModified ? "Unsaved Changes" : "Saved", style: TextStyle(color: showState.isModified ? Colors.orangeAccent : Colors.grey, fontSize: 10)),
+                         const SizedBox(height: 20),
+      
+                         // 2. Main Actions (Grid)
+                         GridView.count(
+                           crossAxisCount: 2,
+                           crossAxisSpacing: 10,
+                           mainAxisSpacing: 10,
+                           shrinkWrap: true, 
+                           physics: const NeverScrollableScrollPhysics(),
+                           childAspectRatio: 1.5, // Slightly wider buttons
+                           children: [
+                              _buildModernButton(
+                                icon: Icons.add, 
+                                label: "New Show", 
+                                color: Colors.grey, 
+                                onTap: () async {
+                                   if (showState.isModified) {
+                                      final confirm = await showDialog<bool>(
+                                         context: context,
+                                         builder: (c) => AlertDialog(
+                                            title: const Text("Discard Changes?"),
+                                            content: const Text("You have unsaved changes. Create new show anyway?"),
+                                            actions: [
+                                               TextButton(onPressed: () => Navigator.pop(c, false), child: const Text("Cancel")),
+                                               ElevatedButton(onPressed: () => Navigator.pop(c, true), child: const Text("Discard & New"))
+                                            ]
+                                         )
+                                      );
+                                      if (confirm != true) return;
+                                   }
+                                   showState.newShow();
+                                }
+                              ),
+                              _buildModernButton(
+                                icon: Icons.folder, 
+                                label: "Load Show", 
+                                color: Colors.grey, 
+                                onTap: () async {
+                                   if (showState.isModified) {
+                                       // Warning omitted for brevity, logic same as above
+                                   }
+                                   showState.loadShow();
+                                }
+                              ),
+                              _buildModernButton(
+                                icon: Icons.save, 
+                                label: "Save Show", 
+                                color: const Color(0xFF90CAF9), 
+                                isEnabled: show.mediaFile.isNotEmpty, // "Otherwise disabled"
+                                onTap: () => _saveShowAndFlatten()
+                              ),
+                              _buildModernButton(
+                                icon: Icons.video_library, 
+                                label: "Load Video", 
+                                color: Colors.blueGrey, 
+                                onTap: () => _pickVideo(context)
+                              ),
+                           ],
+                         ),
+                         
+                         const SizedBox(height: 10),
+                         // Export Action (Separate)
+                         SizedBox(
+                           width: double.infinity,
+                           child: _buildModernButton(
+                                 icon: Icons.output, 
+                                 label: "Export to Matrix (MP4)", 
+                                 color: const Color(0xFFA5D6A7), 
+                                 isEnabled: show.mediaFile.isNotEmpty || _selectedEffect != null,
+                                 onTap: () => (_selectedEffect != null) ? _exportEffect() : _exportVideo()
+                           ),
+                         ),
+                         const SizedBox(height: 24),
+                         const SizedBox(height: 32),
+      
+                         // 2.5 Playback Controls
+                         if (show.mediaFile.isNotEmpty) ...[
+      
+                            Row(
+                              children: [
+                                 Expanded(
+                                   child: Container(
+                                     decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8)),
+                                     child: Row(
+                                       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                       children: [
+                                         IconButton(
+                                           onPressed: () => player.playOrPause(),
+                                           icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
+                                           color: Colors.white,
+                                           tooltip: _isPlaying ? "Pause" : "Play",
+                                         ),
+                                         IconButton(
+                                           onPressed: () async {
+                                             await player.seek(Duration.zero);
+                                             await player.pause();
+                                           },
+                                           icon: const Icon(Icons.stop),
+                                           color: Colors.redAccent,
+                                           tooltip: "Stop",
+                                         ),
+                                       ],
+                                     ),
+                                   ),
+                                 )
+                              ],
+                            ),
+                            const SizedBox(height: 24),
+                         ],
+      
+      
+                         // 3. Edit Modes (Simplifed)
+                         if (show.mediaFile.isNotEmpty) ...[
+                            // Intersection Info
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                 color: Colors.white10,
+                                 borderRadius: BorderRadius.circular(8),
+                                 border: Border.all(color: Colors.white24)
+                              ),
+                              child: Column(
+                                 crossAxisAlignment: CrossAxisAlignment.start,
                                  children: [
-                                    // LAYER 1: Matrix (Localized)
-                                    // Translate so (minX, minY) is at (0,0) of this container
-                                    if (hasFixtures)
-                                      Positioned(
-                                        left: -minX, 
-                                        top: -minY,
-                                        child: CustomPaint(
-                                          painter: PixelGridPainter(
-                                             fixtures: show.fixtures, 
-                                             drawLabels: false,
-                                             gridSize: gridSize
-                                          ),
-                                        ),
-                                      ),
-                                    
-                                    // LAYER 2: Video (Gizmo)
-                                    // We need to place the Video Logic Center at the Canvas Logic Center.
-                                    // Canvas Center = (matW/2, matH/2).
-                                    // Gizmo is centered by 'Alignment.center' of Stack?
-                                    // Stack size is matW, matH. 
-                                    // Alignment.center puts child center at (matW/2, matH/2).
-                                    // So this aligns perfectly!
-                                    
-                                    if (show.mediaFile.isNotEmpty || _selectedEffect != null)
-                                      Center(
-                                        child: OverflowBox(
-                                           minWidth: ((_overrideWidth ?? player.state.width ?? 1920) * transform.scaleX.abs()).toDouble(),
-                                           maxWidth: ((_overrideWidth ?? player.state.width ?? 1920) * transform.scaleX.abs()).toDouble(),
-                                           minHeight: ((_overrideHeight ?? player.state.height ?? 1080) * transform.scaleY.abs()).toDouble(),
-                                           maxHeight: ((_overrideHeight ?? player.state.height ?? 1080) * transform.scaleY.abs()).toDouble(),
-                                           alignment: Alignment.center,
-                                           child: Listener(
-                                            onPointerDown: (_) => debugPrint("Layer 1: Gizmo Wrapper Hit"),
-                                            child: TransformGizmo(
-                                              transform: transform,
-                                              isCropMode: true, // Show handles
-                                              editMode: EditMode.zoom, // ALWAYS ZOOM/PAN
-                                              lockAspect: _lockAspectRatio,
-                                              onDoubleTap: _fitToMatrix,
-                                              onUpdate: (newTransform) {
-                                                   showState.updateLayer(isForeground: false, transform: newTransform);
-                                                   _calculateIntersection(); // Update UI info
-                                              },
-                                              child: Container(
-                                                width: (player.state.width ?? 1920).toDouble(),
-                                                height: (player.state.height ?? 1080).toDouble(),
-                                                child: (_selectedEffect != null) 
-                                                  ? AspectRatio(
-                                                      aspectRatio: 16 / 9,
-                                                      child: EffectRenderer(
-                                                          type: _selectedEffect, 
-                                                          params: _effectParams,
-                                                          isPlaying: _isPlaying
-                                                      )
-                                                    )
-                                                  : Video(controller: controller, fit: BoxFit.fill, controls: NoVideoControls),
-                                              ),
+                                    Text("MATRIX INTERSECTION", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 10, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                                    const SizedBox(height: 8),
+                                    if (_currentIntersection != null) ...[
+                                       _buildInfoRow("X Start", "$_displayX"),
+                                       _buildInfoRow("Width", "${_intersectW} px"),
+                                       _buildInfoRow("Y Start", "$_displayY"),
+                                       _buildInfoRow("Height", "${_intersectH} px"),
+                                    ] else 
+                                       Text("No Intersection / No Matrix", style: TextStyle(color: Colors.redAccent, fontSize: 12)),
+                                 ],
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+      
+                            Row(
+                               children: [
+                                  Text("Lock Aspect", style: const TextStyle(color: Colors.white70)),
+                                  const Spacer(),
+                                  Switch(
+                                    value: _lockAspectRatio, 
+                                    activeThumbColor:  const Color(0xFF90CAF9),
+                                    onChanged: (v) => setState(() => _lockAspectRatio = v)
+                                  ),
+                               ],
+                            ),
+                            const Divider(color: Colors.white12, height: 32),
+                         ],
+      
+                         // 4. Effects or Effect Controls
+                         if (_selectedEffect != null) ...[
+                            Text("EFFECT SETTINGS: ${_selectedEffect!.name.toUpperCase()}", style: const TextStyle(color: Color(0xFFA5D6A7), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                            const SizedBox(height: 12),
+                             
+                            // Removed Expanded
+                            Column(
+                                 crossAxisAlignment: CrossAxisAlignment.start,
+                                 children: [
+                                    ..._effectParams.keys.map((key) {
+                                        final def = EffectService.effects.firstWhere((e) => e.type == _selectedEffect);
+                                        double min = def.minParams[key] ?? 0.0;
+                                        double max = def.maxParams[key] ?? 1.0;
+                                        
+                                        return Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text("$key: ${_effectParams[key]!.toStringAsFixed(2)}", style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                                            Slider(
+                                              value: _effectParams[key]!,
+                                              min: min,
+                                              max: max,
+                                              activeColor: const Color(0xFF90CAF9),
+                                              inactiveColor: Colors.white12,
+                                              onChanged: (v) => setState(() => _effectParams[key] = v),
                                             ),
-                                        ),
-                                      ),
-                                    )
-                                     else
-                                      const Center(
-                                        child: Text(
-                                          "No video loaded.\nUse 'Load Video' on the right panel.",
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(color: Colors.white54, fontSize: 40), // Large text for large world
-                                        ),
-                                      ),
+                                          ],
+                                        );
+                                   }),
+                                   const SizedBox(height: 20),
+                                   _buildModernButton(
+                                     icon: Icons.check, 
+                                     label: "Apply & Close", 
+                                     color: const Color(0xFF90CAF9),
+                                     onTap: () => setState(() => _selectedEffect = null), // Or just deselect to view
+                                   ),
                                  ],
                                ),
+                         ] else ...[
+                             Text("EFFECTS LIBRARY", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+                             const SizedBox(height: 12),
+                             // Removed Expanded and added shrinkWrap
+                             ListView(
+                                shrinkWrap: true,
+                                physics: const NeverScrollableScrollPhysics(),
+                                children: EffectType.values.map((e) {
+                                   return Container(
+                                     margin: const EdgeInsets.only(bottom: 8),
+                                     decoration: BoxDecoration(
+                                       color: Colors.white.withOpacity(0.05),
+                                       borderRadius: BorderRadius.circular(8),
+                                     ),
+                                     child: ListTile(
+                                       leading: Icon(Icons.auto_fix_high, color: Colors.white70),
+                                       title: Text(e.name.toUpperCase(), style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
+                                      onTap: () {
+                                        setState(() {
+                                          _selectedEffect = e;
+                                          _loadEffectDefaults(e);
+                                        });
+                                      },
+                                    ),
+                                  );
+                               }).toList(),
                              ),
-                             ), // Close Container
-                             ), // Close Transform
-                           ); // Close Center
-                        },
-                      ),
-                    ],
+    
+                       ],
+    
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-          ),
 
-
-            // Glass Sidebar
-            GlassContainer(
-              padding: const EdgeInsets.all(20.0),
-              borderRadius: const BorderRadius.only(topLeft: Radius.circular(16), bottomLeft: Radius.circular(16)),
-              border: const Border(left: BorderSide(color: Colors.white12)),
-              child: SizedBox(
-                width: 320,
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(20.0).copyWith(bottom: 170), // Prevent bottom overflow
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                     // 1. Header
-                     Text("COMPOSER", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
-                     const SizedBox(height: 4),
-                     
-                     // Project Name & Status
-                     Row(
-                       children: [
-                         Expanded(child: Text(show.name, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold), overflow: TextOverflow.ellipsis)),
-                         IconButton(
-                           icon: const Icon(Icons.edit, size: 16, color: Colors.white54),
-                           onPressed: () async {
-                              final nameController = TextEditingController(text: show.name);
-                              final newName = await showDialog<String>(
-                                context: context,
-                                builder: (context) => AlertDialog(
-                                  title: const Text("Rename Show"),
-                                  content: TextField(
-                                    controller: nameController,
-                                    decoration: const InputDecoration(labelText: "Show Name"),
-                                    autofocus: true,
-                                  ),
-                                  actions: [
-                                    TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
-                                    ElevatedButton(onPressed: () => Navigator.pop(context, nameController.text), child: const Text("Save")),
-                                  ],
-                                ),
-                              );
-                              if (newName != null && newName.isNotEmpty) {
-                                showState.updateName(newName);
-                              }
-                           },
-                         )
-                       ],
-                     ),
-                     Text(showState.isModified ? "Unsaved Changes" : "Saved", style: TextStyle(color: showState.isModified ? Colors.orangeAccent : Colors.grey, fontSize: 10)),
-                     const SizedBox(height: 20),
-  
-                     // 2. Main Actions (Grid)
-                     GridView.count(
-                       crossAxisCount: 2,
-                       crossAxisSpacing: 10,
-                       mainAxisSpacing: 10,
-                       shrinkWrap: true, 
-                       physics: const NeverScrollableScrollPhysics(),
-                       childAspectRatio: 1.5, // Slightly wider buttons
-                       children: [
-                          _buildModernButton(
-                            icon: Icons.add, 
-                            label: "New Show", 
-                            color: Colors.grey, 
-                            onTap: () async {
-                               if (showState.isModified) {
-                                  final confirm = await showDialog<bool>(
-                                     context: context,
-                                     builder: (c) => AlertDialog(
-                                        title: const Text("Discard Changes?"),
-                                        content: const Text("You have unsaved changes. Create new show anyway?"),
-                                        actions: [
-                                           TextButton(onPressed: () => Navigator.pop(c, false), child: const Text("Cancel")),
-                                           ElevatedButton(onPressed: () => Navigator.pop(c, true), child: const Text("Discard & New"))
-                                        ]
-                                     )
-                                  );
-                                  if (confirm != true) return;
-                               }
-                               showState.newShow();
-                            }
-                          ),
-                          _buildModernButton(
-                            icon: Icons.folder, 
-                            label: "Load Show", 
-                            color: Colors.grey, 
-                            onTap: () async {
-                               if (showState.isModified) {
-                                   // Warning omitted for brevity, logic same as above
-                               }
-                               showState.loadShow();
-                            }
-                          ),
-                          _buildModernButton(
-                            icon: Icons.save, 
-                            label: "Save Show", 
-                            color: const Color(0xFF90CAF9), 
-                            isEnabled: show.mediaFile.isNotEmpty, // "Otherwise disabled"
-                            onTap: () => _saveShowAndFlatten()
-                          ),
-                          _buildModernButton(
-                            icon: Icons.video_library, 
-                            label: "Load Video", 
-                            color: Colors.blueGrey, 
-                            onTap: () => _pickVideo(context)
-                          ),
-                       ],
-                     ),
-                     
-                     const SizedBox(height: 10),
-                     // Export Action (Separate)
-                     SizedBox(
-                       width: double.infinity,
-                       child: _buildModernButton(
-                             icon: Icons.output, 
-                             label: "Export to Matrix (MP4)", 
-                             color: const Color(0xFFA5D6A7), 
-                             isEnabled: show.mediaFile.isNotEmpty || _selectedEffect != null,
-                             onTap: () => (_selectedEffect != null) ? _exportEffect() : _exportVideo()
-                       ),
-                     ),
-                     const SizedBox(height: 24),
-                     const SizedBox(height: 32),
-  
-                     // 2.5 Playback Controls
-                     if (show.mediaFile.isNotEmpty) ...[
-  
-                        Row(
-                          children: [
-                             Expanded(
-                               child: Container(
-                                 decoration: BoxDecoration(color: Colors.white10, borderRadius: BorderRadius.circular(8)),
-                                 child: Row(
-                                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                                   children: [
-                                     IconButton(
-                                       onPressed: () => player.playOrPause(),
-                                       icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
-                                       color: Colors.white,
-                                       tooltip: _isPlaying ? "Pause" : "Play",
-                                     ),
-                                     IconButton(
-                                       onPressed: () async {
-                                         await player.seek(Duration.zero);
-                                         await player.pause();
-                                       },
-                                       icon: const Icon(Icons.stop),
-                                       color: Colors.redAccent,
-                                       tooltip: "Stop",
-                                     ),
-                                   ],
-                                 ),
-                               ),
-                             )
-                          ],
-                        ),
-                        const SizedBox(height: 24),
-                     ],
-  
-  
-                     // 3. Edit Modes (Simplifed)
-                     if (show.mediaFile.isNotEmpty) ...[
-                        // Intersection Info
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                             color: Colors.white10,
-                             borderRadius: BorderRadius.circular(8),
-                             border: Border.all(color: Colors.white24)
-                          ),
-                          child: Column(
-                             crossAxisAlignment: CrossAxisAlignment.start,
-                             children: [
-                                Text("MATRIX INTERSECTION", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 10, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
-                                const SizedBox(height: 8),
-                                if (_currentIntersection != null) ...[
-                                   _buildInfoRow("X Start", "$_displayX"),
-                                   _buildInfoRow("Width", "${_intersectW} px"),
-                                   _buildInfoRow("Y Start", "$_displayY"),
-                                   _buildInfoRow("Height", "${_intersectH} px"),
-                                ] else 
-                                   Text("No Intersection / No Matrix", style: TextStyle(color: Colors.redAccent, fontSize: 12)),
-                             ],
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-  
-                        Row(
-                           children: [
-                              Text("Lock Aspect", style: const TextStyle(color: Colors.white70)),
-                              const Spacer(),
-                              Switch(
-                                value: _lockAspectRatio, 
-                                activeThumbColor:  const Color(0xFF90CAF9),
-                                onChanged: (v) => setState(() => _lockAspectRatio = v)
-                              ),
-                           ],
-                        ),
-                        const Divider(color: Colors.white12, height: 32),
-                     ],
-  
-                     // 4. Effects or Effect Controls
-                     if (_selectedEffect != null) ...[
-                        Text("EFFECT SETTINGS: ${_selectedEffect!.name.toUpperCase()}", style: const TextStyle(color: Color(0xFFA5D6A7), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 12),
-                         
-                        // Removed Expanded
-                        Column(
-                             crossAxisAlignment: CrossAxisAlignment.start,
-                             children: [
-                                ..._effectParams.keys.map((key) {
-                                    final def = EffectService.effects.firstWhere((e) => e.type == _selectedEffect);
-                                    double min = def.minParams[key] ?? 0.0;
-                                    double max = def.maxParams[key] ?? 1.0;
-                                    
-                                    return Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text("$key: ${_effectParams[key]!.toStringAsFixed(2)}", style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                                        Slider(
-                                          value: _effectParams[key]!,
-                                          min: min,
-                                          max: max,
-                                          activeColor: const Color(0xFF90CAF9),
-                                          inactiveColor: Colors.white12,
-                                          onChanged: (v) => setState(() => _effectParams[key] = v),
-                                        ),
-                                      ],
-                                    );
-                               }),
-                               const SizedBox(height: 20),
-                               _buildModernButton(
-                                 icon: Icons.check, 
-                                 label: "Apply & Close", 
-                                 color: const Color(0xFF90CAF9),
-                                 onTap: () => setState(() => _selectedEffect = null), // Or just deselect to view
-                               ),
-                             ],
-                           ),
-                     ] else ...[
-                         Text("EFFECTS LIBRARY", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
-                         const SizedBox(height: 12),
-                         // Removed Expanded and added shrinkWrap
-                         ListView(
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                            children: EffectType.values.map((e) {
-                               return Container(
-                                 margin: const EdgeInsets.only(bottom: 8),
-                                 decoration: BoxDecoration(
-                                   color: Colors.white.withValues(alpha: 0.05),
-                                   borderRadius: BorderRadius.circular(8),
-                                 ),
-                                 child: ListTile(
-                                   leading: Icon(Icons.auto_fix_high, color: Colors.white70),
-                                   title: Text(e.name.toUpperCase(), style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold)),
-                                  onTap: () {
-                                    setState(() {
-                                      _selectedEffect = e;
-                                      _loadEffectDefaults(e);
-                                    });
-                                  },
-                                ),
-                              );
-                           }).toList(),
-                         ),
-
-                   ],
-
-                  ],
+                Expanded(
+                  child: Container(
+                    color: Colors.red,
+                    child: const Center(
+                      child: Text(
+                        "NUCLEAR DEBUG\nIF YOU SEE THIS, LAYOUT IS OK",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white, fontSize: 40, fontWeight: FontWeight.bold)
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
           ),
         ],
       ));

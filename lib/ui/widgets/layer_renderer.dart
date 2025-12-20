@@ -8,12 +8,14 @@ class LayerRenderer extends StatelessWidget {
   final LayerConfig layer;
   final VideoController? controller;
   final bool isPlaying;
+  final double initialTime;
 
   const LayerRenderer({
     super.key,
     required this.layer,
     this.controller,
     this.isPlaying = true,
+    this.initialTime = 0.0,
   });
 
   @override
@@ -26,7 +28,10 @@ class LayerRenderer extends StatelessWidget {
     switch (layer.type) {
       case LayerType.video:
         if (controller != null) {
-          content = Video(controller: controller!);
+          content = Video(
+            controller: controller!,
+            controls: NoVideoControls,
+          );
         } else {
           content = const SizedBox.shrink();
         }
@@ -37,6 +42,7 @@ class LayerRenderer extends StatelessWidget {
             type: layer.effect!,
             params: layer.effectParams,
             isPlaying: isPlaying,
+            initialTime: initialTime,
           );
         } else {
           content = const SizedBox.shrink();

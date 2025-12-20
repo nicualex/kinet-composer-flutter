@@ -18,7 +18,7 @@ class LayerConfig {
   final LayerType type;
   final String? path; // Path to video file
   final EffectType? effect; // Effect type
-  final Map<String, double> effectParams;
+  final Map<String, dynamic> effectParams;
   final double opacity;
   final bool isVisible;
   final MediaTransform? transform;
@@ -39,7 +39,7 @@ class LayerConfig {
     LayerType? type,
     String? path,
     EffectType? effect,
-    Map<String, double>? effectParams,
+    Map<String, dynamic>? effectParams,
     double? opacity,
     bool? isVisible,
     MediaTransform? transform,
@@ -70,10 +70,7 @@ class LayerConfig {
               orElse: () => EffectType.rainbow,
             )
           : null,
-      effectParams: (json['effectParams'] as Map<String, dynamic>?)?.map(
-            (k, v) => MapEntry(k, (v as num).toDouble()),
-          ) ??
-          const {},
+      effectParams: json['effectParams'] as Map<String, dynamic>? ?? const {},
       opacity: (json['opacity'] as num?)?.toDouble() ?? 1.0,
       isVisible: json['isVisible'] as bool? ?? true,
       transform: json['transform'] != null

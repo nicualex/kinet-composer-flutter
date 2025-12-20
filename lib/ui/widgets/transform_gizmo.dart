@@ -27,10 +27,12 @@ class TransformGizmo extends StatefulWidget {
     this.lockAspect = true,
     this.editMode = EditMode.zoom, // Default
     this.isSelected = true,
+    this.showOutline = true, // NEW
     this.contentSize, // Optional Override
   });
 
   final Size? contentSize;
+  final bool showOutline;
 
   @override
   State<TransformGizmo> createState() => _TransformGizmoState();
@@ -127,23 +129,19 @@ class _TransformGizmoState extends State<TransformGizmo> {
      }
 
      // NORMAL MODE: Pan moves the OBJECT
-     // This is simple translation in Global Space. 
-     // We simply add global delta to global translate?
-     // Yes, translateX/Y are translations applied in parent space (usually).
-     // Wait, is translate applied *before* rotate/scale or after?
-     // Matrix: Translate -> Rotate -> Scale? Or Scale -> Rotate -> Translate?
-     // Gizmo build: 
-     // ..translate(t.translateX, t.translateY)
-     // ..rotateZ...
-     // ..scale...
-     // This means Translate is applied LAST (closest to root), in Global Frame (if parent is unrotated).
-     // PROBABLY correct to just add global delta.
+     // We must correct for the Global View Scale (FittedBox, etc.)
+     // If the view is zoomed out (Scale < 1), 1 screen pixel = Many logic pixels.
+     double globalScale = _getGlobalScaleFactor();
+     if (globalScale == 0) globalScale = 1.0;
+
+     double dx = (details.globalPosition.dx - _dragStart!.dx) / globalScale;
+     double dy = (details.globalPosition.dy - _dragStart!.dy) / globalScale;
      
      widget.onUpdate(MediaTransform(
        scaleX: _initialTransform!.scaleX,
        scaleY: _initialTransform!.scaleY,
-       translateX: _initialTransform!.translateX + (details.globalPosition.dx - _dragStart!.dx),
-       translateY: _initialTransform!.translateY + (details.globalPosition.dy - _dragStart!.dy),
+       translateX: _initialTransform!.translateX + dx,
+       translateY: _initialTransform!.translateY + dy,
        rotation: _initialTransform!.rotation,
        crop: _initialTransform!.crop,
      ));
@@ -445,9 +443,7 @@ class _TransformGizmoState extends State<TransformGizmo> {
           clipBehavior: Clip.none,
           children: [
             // 1. The Content (Child) transformed.
-            ClipRect(
-              clipBehavior: Clip.hardEdge,
-              child: Transform(
+              Transform(
                   transform: Matrix4.identity()
                     ..translate(t.translateX, t.translateY)
                     ..rotateZ(t.rotation * pi / 180)
@@ -471,17 +467,16 @@ class _TransformGizmoState extends State<TransformGizmo> {
                          
                          // LAYER 3: Crop UI (If active)
                          // Padding applied inside _buildCropUI via Positioned offsets to avoid ParentDataWidget error
-                         if(widget.isSelected && widget.isCropMode && widget.editMode == EditMode.crop && t.crop != null) 
+                         if(widget.isSelected && widget.showOutline && widget.isCropMode && widget.editMode == EditMode.crop && t.crop != null) 
                             _buildCropUI(t.crop!, t, padX, padY),
   
                          // LAYER 4: Standard UI (Zoom handles)
                          // Positioned with explicit offsets, sits on top
-                         if(widget.isSelected && widget.isCropMode && widget.editMode == EditMode.zoom)
+                         if(widget.isSelected && widget.showOutline && widget.editMode == EditMode.zoom)
                             ..._buildStandardUI(t, padX, padY),
                       ],
                     ),
               ),
-            ),
           ],
         );
       },
@@ -579,10 +574,10 @@ class _TransformGizmoState extends State<TransformGizmo> {
                  decoration: BoxDecoration(
                    // Compensation for Non-Uniform Scale
                    border: Border(
-                      top: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale) / t.scaleY.abs()),
-                      bottom: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale) / t.scaleY.abs()),
-                      left: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale) / t.scaleX.abs()),
-                      right: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale) / t.scaleX.abs()),
+                      top: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale)),
+                      bottom: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale)),
+                      left: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale)),
+                      right: BorderSide(color: Colors.blueAccent, width: (2.0 / globalScale)),
                    ),
                  ),
               ),
@@ -604,46 +599,18 @@ class _TransformGizmoState extends State<TransformGizmo> {
      double globalScale = _getGlobalScaleFactor();
      if (globalScale == 0) globalScale = 1.0;
      
-     // Note: We also divide by ScaleX/Y because the handle is inside the Scaled Transform?
-     // NO. The Handles are OUTSIDE the Transform in the Stack! 
-     // Wait, let's check build method.
-     // Stack children:
-     // 1. Transform(child: Content) 
-     // 2. PanHandler
-     // 3. Crop UI
-     // 4. Standard UI (Handles) -> _buildStandardUI
-     
-     // The Stack is NOT Scaled. Only the Content is Scaled.
-     // So standard handles are in "Logic Space" (1920x1080).
-     // They are NOT affected by t.scaleX.
-     // BUT we previously divided by sX? "width: 48 / sX".
-     // Why? Because we wanted them to stay small relative to the growing object?
-     // No, if the object grows, and we want constant handle size, we shouldn't divide.
-     
-     // Wait, if I scale the object up 2x, the handles are overlay widgets on top.
-     // If the Stack size grows... No, the Stack size is determined by `IntrinsicWidth(Stack(Child))`.
-     // If `Child` (Video) is 1920x1080, Stack is 1920x1080. 
-     // Scale is applied to the Child Transform ONLY?
-     // Let's check `_buildStandardUI` call site.
-     // It is inside the `Stack`, sibling to `Transform`.
-     // So it is in "Logic Space" (1920x1080).
-     // "FittedBox" scales this entire Stack down to fit Screen (1000px).
-     
-     // So, GlobalScale tells us 1 Logic Px = X Screen Px.
-     // We want Handle = 48 Screen Px.
-     // HandleLogicSize = 48 / GlobalScale.
-     
      // UN-SCALE Logic:
      // Visual Size = LogicSize * LocalScale * GlobalScale.
      // We want Visual Size = 48.
-     // LogicSize = 48 / (LocalScale * GlobalScale).
+     // LogicSize = 48 / (GlobalScale).
+     // Note: Handles are OUTSIDE the transform, so we do NOT divide by sX/sY.
      
      double safeSX = sX.abs(); if (safeSX < 0.001) safeSX = 0.001;
      double safeSY = sY.abs(); if (safeSY < 0.001) safeSY = 0.001;
      
      // INCREASED HIT AREA TO 150px (was 96)
-     double w = (150.0 / globalScale) / safeSX;
-     double h = (150.0 / globalScale) / safeSY;
+     double w = (200.0 / globalScale);
+     double h = (200.0 / globalScale);
      
      return Positioned(
        left: x - (w / 2), 
@@ -658,8 +625,8 @@ class _TransformGizmoState extends State<TransformGizmo> {
            color: Colors.transparent, // Hit area
            alignment: Alignment.center,
            child: Container(
-             width: (20 / globalScale) / safeSX,
-             height: (20 / globalScale) / safeSY,
+             width: (32 / globalScale),
+             height: (32 / globalScale),
              color: Colors.yellowAccent,
            ),
          ),
@@ -672,22 +639,11 @@ class _TransformGizmoState extends State<TransformGizmo> {
      if (globalScale == 0) globalScale = 1.0;
      
      double safeSX = scale.abs(); if (safeSX < 0.001) safeSX = 0.001;
-     // Note: _buildHandle assumes Uniform scale for positioning in legacy code, 
-     // but here 'scale' input implies uniform? 
-     // Wait, _buildStandardUI passes 't.scaleX' to all.
-     // If Scale is Non-Uniform, this is wrong.
-     // If Unlocked... user can distort.
-     // We should fix _buildHandle to take sX and sY.
-     // But that requires changing call sites.
-     
-     // TEMPORARY FIX: Assume uniform unscaling for handles is "okay enough" 
-     // OR (Better): Read ScaleY from widget.transform since this is method on State.
-     
      double safeSY = widget.transform.scaleY.abs(); if (safeSY < 0.001) safeSY = 0.001;
 
      // INCREASED HIT AREA TO 150px (Radius 75)
-     double radiusX = (75.0 / globalScale) / safeSX;
-     double radiusY = (75.0 / globalScale) / safeSY;
+     double radiusX = (100.0 / globalScale);
+     double radiusY = (100.0 / globalScale);
      
      return Positioned(
        left: align.x < 0 ? (padX - radiusX) : null, 
@@ -699,13 +655,13 @@ class _TransformGizmoState extends State<TransformGizmo> {
          onPanStart: _onPanStart,
          onPanUpdate: (d) => _onScaleUpdate(d, align),
          child: Container(
-           width: (150.0 / globalScale) / safeSX,
-           height: (150.0 / globalScale) / safeSY,
+           width: (200.0 / globalScale),
+           height: (200.0 / globalScale),
            color: Colors.transparent, // Hit area
            alignment: Alignment.center,
            child: Container(
-             width: (20.0 / globalScale) / safeSX,
-             height: (20.0 / globalScale) / safeSY,
+             width: (32.0 / globalScale),
+             height: (32.0 / globalScale),
              color: Colors.blue,
            ),
          ),

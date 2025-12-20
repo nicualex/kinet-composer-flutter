@@ -19,9 +19,29 @@ class ShowState extends ChangeNotifier {
   ShowManifest? _currentShow;
   File? _currentFile;
   bool _isModified = false;
+  
+  // For Rendering
+  double? _overrideTime;
+  double? get overrideTime => _overrideTime;
+
+  // View State (Global)
+  bool _isLayoutLocked = false;
+  bool get isLayoutLocked => _isLayoutLocked;
 
   ShowState() {
      _initNewShow();
+  }
+
+  void setLayoutLock(bool locked) {
+     if (_isLayoutLocked != locked) {
+        _isLayoutLocked = locked;
+        notifyListeners();
+     }
+  }
+
+  void setOverrideTime(double? t) {
+     _overrideTime = t;
+     notifyListeners();
   }
 
   // Helper to generate pixels for any grid
@@ -42,8 +62,8 @@ class ShowState extends ChangeNotifier {
   }
 
   void _initNewShow() {
-    // Generate default 100x100 Matrix
-    final pixels = _generatePixels(100, 100, "matrix-1");
+    // Generate default 300x200 Matrix
+    final pixels = _generatePixels(300, 200, "matrix-1");
 
     _currentShow = ShowManifest(
       version: 1,
@@ -56,8 +76,8 @@ class ShowState extends ChangeNotifier {
             ip: "192.168.1.100",
             port: 6038,
             protocol: "KiNET v2",
-            width: 100,
-            height: 100,
+            width: 300,
+            height: 200,
             pixels: pixels
          )
       ],
@@ -74,6 +94,11 @@ class ShowState extends ChangeNotifier {
   File? get currentFile => _currentFile;
   bool get isModified => _isModified;
   String? get fileName => _currentFile?.path.split(Platform.pathSeparator).last;
+  
+  // Helpers for RenderService/Dialog
+  Fixture get matrixConfig => _currentShow?.fixtures.isNotEmpty == true ? _currentShow!.fixtures.first : Fixture(id: 'dummy', name: 'dummy', ip: '', port: 0, protocol: '', width: 100, height: 100, pixels: []); // Safe fallback
+  String get currentShowPath => _currentFile?.path ?? "New Show";
+  List<LayerConfig> get layers => _currentShow != null ? [_currentShow!.backgroundLayer, _currentShow!.middleLayer, _currentShow!.foregroundLayer] : [];
 
   void newShow() {
     _initNewShow();
@@ -89,15 +114,52 @@ class ShowState extends ChangeNotifier {
     if (result != null && result.files.single.path != null) {
       final file = File(result.files.single.path!);
       try {
+        // 1. CLEAR EXISTING STATE
+        // Reset everything to defaults first
+        _initNewShow();
+        
+        // 2. LOAD NEW STATE
         final content = await file.readAsString();
         final json = jsonDecode(content);
-        _currentShow = ShowManifest.fromJson(json);
+        final loadedShow = ShowManifest.fromJson(json);
+
+        // 3. INITIALIZE MATRIX FROM FILE
+        // Check if loaded show has a matrix fixture and ensure it's set up correctly
+        List<Fixture> fixtures = loadedShow.fixtures;
+        if (fixtures.isNotEmpty) {
+           final mx = fixtures.first;
+           // If pixels are missing but dims exist (common in some saves), regen them
+           if (mx.pixels.isEmpty && mx.width > 0 && mx.height > 0) {
+              final newPixels = _generatePixels(mx.width, mx.height, mx.id);
+              fixtures[0] = Fixture(
+                 id: mx.id, 
+                 name: mx.name, 
+                 ip: mx.ip, 
+                 port: mx.port, 
+                 protocol: mx.protocol, 
+                 width: mx.width, 
+                 height: mx.height, 
+                 pixels: newPixels
+              );
+           }
+        }
+        
+        _currentShow = ShowManifest(
+           version: loadedShow.version,
+           name: loadedShow.name,
+           mediaFile: loadedShow.mediaFile,
+           fixtures: fixtures,
+           settings: loadedShow.settings,
+           backgroundLayer: loadedShow.backgroundLayer,
+           middleLayer: loadedShow.middleLayer,
+           foregroundLayer: loadedShow.foregroundLayer,
+        );
+        
         _currentFile = file;
         _isModified = false;
         notifyListeners();
       } catch (e) {
         debugPrint('Error loading show: $e');
-        // Ideally rethrow or set error state
       }
     }
   }
@@ -157,7 +219,7 @@ class ShowState extends ChangeNotifier {
     LayerType? type,
     String? path,
     EffectType? effect,
-    Map<String, double>? params,
+    Map<String, dynamic>? params,
     double? opacity,
 
     bool? isVisible,
@@ -291,12 +353,7 @@ class ShowState extends ChangeNotifier {
     // Regenerate pixels
     List<Pixel> newPixels = _generatePixels(width, height, fixtureId);
 
-    final newFixture = Fixture(
-      id: oldFixture.id,
-      name: oldFixture.name,
-      ip: oldFixture.ip,
-      port: oldFixture.port,
-      protocol: oldFixture.protocol,
+    final newFixture = oldFixture.copyWith(
       width: width,
       height: height,
       pixels: newPixels
@@ -305,18 +362,42 @@ class ShowState extends ChangeNotifier {
     List<Fixture> newFixtures = List.from(_currentShow!.fixtures);
     newFixtures[index] = newFixture;
 
-    _currentShow = ShowManifest(
-      version: _currentShow!.version,
-      name: _currentShow!.name,
-      mediaFile: _currentShow!.mediaFile,
-      fixtures: newFixtures,
-      settings: _currentShow!.settings,
-      backgroundLayer: _currentShow!.backgroundLayer,
-      middleLayer: _currentShow!.middleLayer,
-      foregroundLayer: _currentShow!.foregroundLayer,
-    );
+    _currentShow = _currentShow!.copyWith(fixtures: newFixtures);
     _isModified = true;
     notifyListeners();
+  }
+
+  void updateFixturePosition(String fixtureId, double x, double y, double rotation) {
+    if (_currentShow == null) return;
+
+    final index = _currentShow!.fixtures.indexWhere((f) => f.id == fixtureId);
+    if (index == -1) return;
+
+    final oldFixture = _currentShow!.fixtures[index];
+    final newFixture = oldFixture.copyWith(x: x, y: y, rotation: rotation);
+
+    List<Fixture> newFixtures = List.from(_currentShow!.fixtures);
+    newFixtures[index] = newFixture;
+
+    _currentShow = _currentShow!.copyWith(fixtures: newFixtures);
+    _isModified = true;
+    notifyListeners();
+  }
+
+  void updateFixtures(List<Fixture> fixtures) {
+     if (_currentShow == null) return;
+     _currentShow = _currentShow!.copyWith(fixtures: fixtures);
+     _isModified = true;
+     notifyListeners();
+  }
+
+  void updateLayoutBounds(double width, double height) {
+     if (_currentShow == null) return;
+     if (_currentShow!.layoutWidth == width && _currentShow!.layoutHeight == height) return;
+     
+     _currentShow = _currentShow!.copyWith(layoutWidth: width, layoutHeight: height);
+     _isModified = true;
+     notifyListeners();
   }
 
   // --- BUNDLING FOR TRANSFER ---

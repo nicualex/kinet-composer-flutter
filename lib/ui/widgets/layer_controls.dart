@@ -121,12 +121,15 @@ class LayerControls extends StatelessWidget {
                         max: 1.0,
                          activeColor: isSelected ? const Color(0xFF90CAF9) : Colors.white30,
                          inactiveColor: Colors.white10,
-                        onChanged: (v) {
-                           context.read<ShowState>().updateLayer(
-                              target: target,
-                              opacity: v
-                           );
-                        },
+                         onChangeStart: (_) {
+                            if (!isSelected) onSelectLayer(target);
+                         },
+                         onChanged: (v) {
+                            context.read<ShowState>().updateLayer(
+                               target: target,
+                               opacity: v
+                            );
+                         },
                       ),
                     ),
                   ),

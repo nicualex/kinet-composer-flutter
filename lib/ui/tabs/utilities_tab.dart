@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:kinet_composer/ui/tabs/project_tab.dart';
-import 'package:kinet_composer/ui/tabs/setup_tab.dart';
 import '../widgets/glass_container.dart';
+import '../panels/device_discovery_panel.dart';
 
 class UtilitiesTab extends StatefulWidget {
   const UtilitiesTab({super.key});
@@ -11,52 +10,54 @@ class UtilitiesTab extends StatefulWidget {
 }
 
 class _UtilitiesTabState extends State<UtilitiesTab> {
-  int _selectedIndex = 0; // 0: Network, 1: Setup
+  int _selectedIndex = 0; // 0: Device Discovery, 1: Layout Editor
 
   @override
   Widget build(BuildContext context) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Main Content Area
-        Expanded(
-          child: Container(
-             color: Colors.black87,
-             child: _selectedIndex == 0 
-                ? const ProjectTab() 
-                : const SetupTab(),
-          ),
-        ),
-
-        // Sidebar Navigation
+        // Sidebar Navigation (Moved to Left)
         GlassContainer(
           padding: const EdgeInsets.all(20.0),
-          borderRadius: const BorderRadius.only(topLeft: Radius.circular(16), bottomLeft: Radius.circular(16)),
-          border: const Border(left: BorderSide(color: Colors.white12)),
+          tint: Colors.black, // Dark panel
+          opacity: 0.95,       // Almost opaque for visibility
+          borderRadius: const BorderRadius.only(topRight: Radius.circular(16), bottomRight: Radius.circular(16)),
+          border: const Border(right: BorderSide(color: Colors.white12)),
           child: SizedBox(
             width: 320,
             child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-               Text("UTILITIES", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+               Text("LAYOUT", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                const SizedBox(height: 20),
 
                // Navigation Buttons
                _buildNavButton(
                  index: 0,
-                 icon: Icons.cloud_upload,
-                 label: "Network & Upload",
-                 description: "Scan players & upload shows"
+                 icon: Icons.search,
+                 label: "Device Discovery",
+                 description: "Scan KiNET v2 Devices"
                ),
                const SizedBox(height: 12),
                _buildNavButton(
                  index: 1,
                  icon: Icons.grid_on,
-                 label: "Matrix Setup",
-                 description: "Configure pixel grid"
+                 label: "Layout Editor",
+                 description: "Arrange discovered devices"
                ),
             ],
           ),
+          ),
+        ),
+
+        // Main Content Area
+        Expanded(
+          child: Container(
+             color: Colors.black,
+             child: _selectedIndex == 0 
+                ? const DeviceDiscoveryPanel() 
+                : const Center(child: Text("LAYOUT EDITOR (Coming Soon)", style: TextStyle(color: Colors.white, fontSize: 30))),
           ),
         ),
       ],

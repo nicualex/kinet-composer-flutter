@@ -70,6 +70,11 @@ class Fixture {
   final int width; // Logical width in pixels
   final int height;
   final List<Pixel> pixels;
+  
+  // Layout Properties
+  final double x;
+  final double y;
+  final double rotation; // In degrees
 
   Fixture({
     required this.id,
@@ -80,6 +85,9 @@ class Fixture {
     required this.width,
     required this.height,
     required this.pixels,
+    this.x = 0.0,
+    this.y = 0.0,
+    this.rotation = 0.0,
   });
 
   factory Fixture.fromJson(Map<String, dynamic> json) {
@@ -94,6 +102,9 @@ class Fixture {
       pixels: (json['pixels'] as List<dynamic>)
           .map((e) => Pixel.fromJson(e as Map<String, dynamic>))
           .toList(),
+      x: (json['x'] as num?)?.toDouble() ?? 0.0,
+      y: (json['y'] as num?)?.toDouble() ?? 0.0,
+      rotation: (json['rotation'] as num?)?.toDouble() ?? 0.0,
     );
   }
 
@@ -107,7 +118,37 @@ class Fixture {
       'width': width,
       'height': height,
       'pixels': pixels.map((e) => e.toJson()).toList(),
+      'x': x,
+      'y': y,
+      'rotation': rotation,
     };
+  }
+  Fixture copyWith({
+    String? id,
+    String? name,
+    String? ip,
+    int? port,
+    String? protocol,
+    int? width,
+    int? height,
+    List<Pixel>? pixels,
+    double? x,
+    double? y,
+    double? rotation,
+  }) {
+    return Fixture(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      ip: ip ?? this.ip,
+      port: port ?? this.port,
+      protocol: protocol ?? this.protocol,
+      width: width ?? this.width,
+      height: height ?? this.height,
+      pixels: pixels ?? this.pixels,
+      x: x ?? this.x,
+      y: y ?? this.y,
+      rotation: rotation ?? this.rotation,
+    );
   }
 }
 
@@ -144,6 +185,8 @@ class ShowManifest {
   final LayerConfig backgroundLayer;
   final LayerConfig middleLayer;
   final LayerConfig foregroundLayer;
+  final double layoutWidth;
+  final double layoutHeight;
 
   ShowManifest({
     required this.version,
@@ -154,52 +197,24 @@ class ShowManifest {
     this.backgroundLayer = const LayerConfig(),
     this.middleLayer = const LayerConfig(),
     this.foregroundLayer = const LayerConfig(),
+    this.layoutWidth = 3200.0, // Default Canvas Width
+    this.layoutHeight = 1600.0, // Default Canvas Height
   });
 
   factory ShowManifest.fromJson(Map<String, dynamic> json) {
-    // Migration Logic:
-    
-    // 1. Recover Legacy Transform
-    MediaTransform? legacyTransform;
-    if (json['mediaTransform'] != null) {
-       legacyTransform = MediaTransform.fromJson(json['mediaTransform'] as Map<String, dynamic>);
-    }
-
-    // 2. Recover Legacy Background Layer
-    LayerConfig bgLayer;
-    if (json['backgroundLayer'] != null) {
-      bgLayer = LayerConfig.fromJson(json['backgroundLayer'] as Map<String, dynamic>);
-    } else if (json['mediaFile'] != null && (json['mediaFile'] as String).isNotEmpty) {
-      // Legacy Migration
-      bgLayer = LayerConfig(
-        type: LayerType.video,
-        path: json['mediaFile'] as String,
-        opacity: 1.0,
-      );
-    } else {
-      bgLayer = const LayerConfig();
-    }
-    
-    // 3. Apply Legacy Transform iff layer has none
-    if (bgLayer.transform == null && legacyTransform != null) {
-       bgLayer = bgLayer.copyWith(transform: legacyTransform);
-    }
-
     return ShowManifest(
       version: json['version'] as int,
       name: json['name'] as String,
-      mediaFile: json['mediaFile'] as String? ?? '', // Keep for now or empty?
+      mediaFile: json['mediaFile'] as String? ?? '', // Handle potential null in legacy
       fixtures: (json['fixtures'] as List<dynamic>)
           .map((e) => Fixture.fromJson(e as Map<String, dynamic>))
           .toList(),
       settings: PlaybackSettings.fromJson(json['settings'] as Map<String, dynamic>),
-      backgroundLayer: bgLayer,
-      middleLayer: json['middleLayer'] != null
-          ? LayerConfig.fromJson(json['middleLayer'] as Map<String, dynamic>)
-          : const LayerConfig(),
-      foregroundLayer: json['foregroundLayer'] != null
-          ? LayerConfig.fromJson(json['foregroundLayer'] as Map<String, dynamic>)
-          : const LayerConfig(),
+      backgroundLayer: json['backgroundLayer'] != null ? LayerConfig.fromJson(json['backgroundLayer']) : const LayerConfig(),
+      middleLayer: json['middleLayer'] != null ? LayerConfig.fromJson(json['middleLayer']) : const LayerConfig(),
+      foregroundLayer: json['foregroundLayer'] != null ? LayerConfig.fromJson(json['foregroundLayer']) : const LayerConfig(),
+      layoutWidth: (json['layoutWidth'] as num?)?.toDouble() ?? 3200.0,
+      layoutHeight: (json['layoutHeight'] as num?)?.toDouble() ?? 1600.0,
     );
   }
 
@@ -213,7 +228,34 @@ class ShowManifest {
       'backgroundLayer': backgroundLayer.toJson(),
       'middleLayer': middleLayer.toJson(),
       'foregroundLayer': foregroundLayer.toJson(),
+      'layoutWidth': layoutWidth,
+      'layoutHeight': layoutHeight,
     };
   }
-}
 
+  ShowManifest copyWith({
+    int? version,
+    String? name,
+    String? mediaFile,
+    List<Fixture>? fixtures,
+    PlaybackSettings? settings,
+    LayerConfig? backgroundLayer,
+    LayerConfig? middleLayer,
+    LayerConfig? foregroundLayer,
+    double? layoutWidth,
+    double? layoutHeight,
+  }) {
+    return ShowManifest(
+      version: version ?? this.version,
+      name: name ?? this.name,
+      mediaFile: mediaFile ?? this.mediaFile,
+      fixtures: fixtures ?? this.fixtures,
+      settings: settings ?? this.settings,
+      backgroundLayer: backgroundLayer ?? this.backgroundLayer,
+      middleLayer: middleLayer ?? this.middleLayer,
+      foregroundLayer: foregroundLayer ?? this.foregroundLayer,
+      layoutWidth: layoutWidth ?? this.layoutWidth,
+      layoutHeight: layoutHeight ?? this.layoutHeight,
+    );
+  }
+}
