@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
-
+import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
@@ -957,18 +957,42 @@ class _VideoTabState extends State<VideoTab> {
      for (var f in show.fixtures) {
          double fw = f.width * kGridSize;
          double fh = f.height * kGridSize;
-         // Handle Rotation
-         bool isRotated = (f.rotation % 180) != 0;
-         double actualW = isRotated ? fh : fw;
-         double actualH = isRotated ? fw : fh;
+         double fw = f.width * kGridSize;
+         double fh = f.height * kGridSize;
          
-         double fx = f.x; // Position is already in pixels
-         double fy = f.y; // Position is already in pixels
+         double cx = fw / 2.0;
+         double cy = fh / 2.0;
          
-         if (fx < minMx) minMx = fx;
-         if (fx + actualW > maxMx) maxMx = fx + actualW;
-         if (fy < minMy) minMy = fy;
-         if (fy + actualH > maxMy) maxMy = fy + actualH;
+         // Fixture Corners (Local, Unrotated)
+         List<Offset> corners = [
+            const Offset(0, 0),
+            Offset(fw, 0),
+            Offset(0, fh),
+            Offset(fw, fh),
+         ];
+         
+         double rads = f.rotation * pi / 180.0;
+         double c = (f.rotation == 0) ? 1.0 : cos(rads);
+         double s = (f.rotation == 0) ? 0.0 : sin(rads);
+         
+         for (var point in corners) {
+            // 1. Shift to Center (Pivot)
+            double dx = point.dx - cx;
+            double dy = point.dy - cy;
+            
+            // 2. Rotate
+            double rx = dx * c - dy * s;
+            double ry = dx * s + dy * c;
+            
+            // 3. Shift back + Global Offset (f.x, f.y)
+            double finalX = rx + cx + f.x;
+            double finalY = ry + cy + f.y;
+            
+            if (finalX < minMx) minMx = finalX;
+            if (finalX > maxMx) maxMx = finalX;
+            if (finalY < minMy) minMy = finalY;
+            if (finalY > maxMy) maxMy = finalY;
+         }
      }
      
      // If no valid bounds found (e.g. fixtures at infinity?), abort
@@ -1408,35 +1432,20 @@ class _VideoTabState extends State<VideoTab> {
                                             double scaleX = 1.0;
                                             double scaleY = 1.0;
                                             
+                                            // 1. Calculate Scale to Fit Matrix
                                             if (show != null && show.fixtures.isNotEmpty) {
-                                                double minMx = double.infinity, maxMx = double.negativeInfinity;
-                                                double minMy = double.infinity, maxMy = double.negativeInfinity;
-                                                for (var f in show.fixtures) {
-                                                   double fw = f.width * kGridSize;
-                                                   double fh = f.height * kGridSize;
-                                                   // Handle Rotation (Swap W/H if 90/270)
-                                                   bool isRotated = (f.rotation % 180) != 0;
-                                                   double actualW = isRotated ? fh : fw;
-                                                   double actualH = isRotated ? fw : fh;
-                                                   
-                                                   double fx = f.x;
-                                                   double fy = f.y;
-                                                   
-                                                   if (fx < minMx) minMx = fx;
-                                                   if (fx + actualW > maxMx) maxMx = fx + actualW;
-                                                   if (fy < minMy) minMy = fy;
-                                                   if (fy + actualH > maxMy) maxMy = fy + actualH;
+                                                final bounds = _calculateMatrixBounds(show);
+                                                double matW = bounds.width;
+                                                double matH = bounds.height;
+                                                
+                                                if (matW > 0 && matH > 0) {
+                                                   // Default Effect Size is 1920x1080
+                                                   scaleX = matW / 1920.0;
+                                                   scaleY = matH / 1080.0;
                                                 }
-                                                maxMx += kGridSize; 
-                                                maxMy += kGridSize;
-                                                
-                                                double matW = maxMx - minMx;
-                                                double matH = maxMy - minMy;
-                                                
-                                                // Default Effect Size is 1920x1080
-                                                scaleX = matW / 1920.0;
-                                                scaleY = matH / 1080.0;
                                             }
+                                                
+
 
                                             context.read<ShowState>().updateLayer(
                                                target: _selectedLayer,
