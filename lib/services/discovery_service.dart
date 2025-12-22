@@ -7,8 +7,9 @@ import 'package:kinet_composer/models/show_manifest.dart';
 
 class DiscoveryService {
   RawDatagramSocket? _socket;
-  final StreamController<Fixture> _deviceStreamController = StreamController.broadcast();
-  Stream<Fixture> get deviceStream => _deviceStreamController.stream;
+  // Stream to expose newly discovered controllers
+  final _controllerStreamController = StreamController<Fixture>.broadcast();
+  Stream<Fixture> get controllerStream => _controllerStreamController.stream;
 
   String? _localIp;
 
@@ -151,8 +152,17 @@ class DiscoveryService {
         height: 10,
         pixels: [],
       );
-      
-      _deviceStreamController.add(fixture);
+      // Emit Controller
+      _controllerStreamController.add(Fixture(
+        id: serial,
+        name: "$detectedName ($serial)",
+        ip: datagram.address.address,
+        port: 6038,
+        protocol: 'KiNET v2',
+        width: 10,
+        height: 10,
+        pixels: [],
+      ));
       return;
     }
 
@@ -174,7 +184,7 @@ class DiscoveryService {
             height: (json['height'] is int) ? json['height'] : int.tryParse(json['height'].toString()) ?? 0,
             pixels: [],
           );
-          _deviceStreamController.add(fixture);
+          _controllerStreamController.add(fixture);
         }
       }
     } catch (e) {
@@ -284,7 +294,7 @@ class DiscoveryService {
      }
   }
 
-  Future<void> setDeviceName(String ip, String newName) async {
+  Future<void> setControllerName(String ip, String newName) async {
      if (_socket == null) return;
      
      debugPrint("Sending SetName command to $ip: '$newName'");
@@ -308,6 +318,6 @@ class DiscoveryService {
 
   void dispose() {
     stopDiscovery();
-    _deviceStreamController.close();
+    _controllerStreamController.close();
   }
 }

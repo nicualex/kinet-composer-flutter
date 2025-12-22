@@ -14,7 +14,7 @@ class ProjectTab extends StatefulWidget {
 }
 
 class _ProjectTabState extends State<ProjectTab> {
-  final List<Fixture> _discoveredDevices = [];
+  final List<Fixture> _discoveredControllers = [];
   bool _isDiscovering = false;
   StreamSubscription<Fixture>? _discoverySubscription;
 
@@ -23,15 +23,15 @@ class _ProjectTabState extends State<ProjectTab> {
     super.initState();
     // Start listening to discovery stream
     final discovery = context.read<DiscoveryService>();
-    _discoverySubscription = discovery.deviceStream.listen((device) {
+    _discoverySubscription = discovery.controllerStream.listen((device) {
       if (!mounted) return;
       setState(() {
         // Dedup by IP
-        final index = _discoveredDevices.indexWhere((d) => d.ip == device.ip);
+        final index = _discoveredControllers.indexWhere((d) => d.ip == device.ip);
         if (index != -1) {
-          _discoveredDevices[index] = device;
+          _discoveredControllers[index] = device;
         } else {
-          _discoveredDevices.add(device);
+          _discoveredControllers.add(device);
         }
       });
     });
@@ -116,11 +116,11 @@ class _ProjectTabState extends State<ProjectTab> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Discovered Players', style: Theme.of(context).textTheme.headlineSmall),
+              Text('Discovered Controllers', style: Theme.of(context).textTheme.headlineSmall),
               ElevatedButton.icon(
                 onPressed: _toggleDiscovery,
                 icon: Icon(_isDiscovering ? Icons.stop : Icons.refresh),
-                label: Text(_isDiscovering ? 'Stop Scan' : 'Scan Devices'),
+                label: Text(_isDiscovering ? 'Stop Scan' : 'Scan Controllers'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _isDiscovering ? Colors.red.withAlpha(50) : null,
                 ),
@@ -130,9 +130,9 @@ class _ProjectTabState extends State<ProjectTab> {
           const SizedBox(height: 8),
           Expanded(
             child: ListView.builder(
-              itemCount: _discoveredDevices.length,
+              itemCount: _discoveredControllers.length,
               itemBuilder: (context, index) {
-                final device = _discoveredDevices[index];
+                final device = _discoveredControllers[index];
                 return ListTile(
                   leading: const Icon(Icons.tv),
                   title: Text(device.name),
@@ -142,12 +142,12 @@ class _ProjectTabState extends State<ProjectTab> {
                        context: context,
                        builder: (c) => AlertDialog(
                          title: Text("Import '${device.name}'?"),
-                         content: Text("Do you want to use this device's configuration?\n\nDimensions: ${device.width} x ${device.height}\nIP: ${device.ip}"),
+                         content: Text("Do you want to use this controller's configuration?\n\nDimensions: ${device.width} x ${device.height}\nIP: ${device.ip}"),
                          actions: [
                            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text("Cancel")),
                            ElevatedButton(
                              onPressed: () => Navigator.pop(c, true), 
-                             child: const Text("Use Device")
+                             child: const Text("Use Controller")
                            ),
                          ],
                        ),

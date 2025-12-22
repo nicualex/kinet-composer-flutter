@@ -62,46 +62,74 @@ class LayerControls extends StatelessWidget {
                   color: isSelected ? Colors.white : Colors.white54,
                 ),
                 const SizedBox(width: 8),
-                Text(label, style: TextStyle(
-                  color: isSelected ? Colors.white : Colors.white70, 
-                  fontWeight: FontWeight.bold, 
-                  fontSize: 12,
-                  letterSpacing: 1.0
-                )),
-                const Spacer(),
-                // Clear Button (if content exists)
-                if (layer.type != LayerType.none)
-                  InkWell(
-                    onTap: () {
-                       context.read<ShowState>().updateLayer(
-                         target: target,
-                         type: LayerType.none,
-                         path: null,
-                         effect: null
-                       );
-                    },
-                    child: const Icon(Icons.close, size: 14, color: Colors.white38),
-                  )
+                Expanded(
+                  child: Text(label, style: TextStyle(
+                    color: isSelected ? Colors.white : Colors.white70, 
+                    fontWeight: FontWeight.bold, 
+                    fontSize: 12,
+                    letterSpacing: 1.0
+                  )),
+                ),
+                // Visibility Toggle
+                InkWell(
+                  onTap: () {
+                     context.read<ShowState>().updateLayer(
+                       target: target,
+                       isVisible: !layer.isVisible
+                     );
+                  },
+                  borderRadius: BorderRadius.circular(12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(4.0),
+                    child: Icon(
+                      layer.isVisible ? Icons.visibility : Icons.visibility_off, 
+                      size: 16, 
+                      color: layer.isVisible ? (isSelected ? Colors.white70 : Colors.white38) : Colors.white24
+                    ),
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 8),
             
-            // Content Info
-            Text(
-               layer.type == LayerType.none 
-                  ? "Empty" 
-                  : (layer.type == LayerType.video 
-                      ? (layer.path?.split(Platform.pathSeparator).last ?? "Unknown Video")
-                      : "Effect: ${layer.effect?.name.toUpperCase() ?? 'NONE'}"),
-               style: TextStyle(color: isSelected ? Colors.white : Colors.white54, fontSize: 11),
-               maxLines: 1,
-               overflow: TextOverflow.ellipsis,
+            // Content Info Row
+            Row(
+              children: [
+                 Expanded(
+                   child: Text(
+                      layer.type == LayerType.none 
+                         ? "Empty" 
+                         : (layer.type == LayerType.video 
+                             ? (layer.path?.split(Platform.pathSeparator).last ?? "Unknown Video")
+                             : "Effect: ${layer.effect?.name.toUpperCase() ?? 'NONE'}"),
+                      style: TextStyle(color: isSelected ? Colors.white : Colors.white54, fontSize: 11),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                   ),
+                 ),
+                 // Clear Button (Next to Name)
+                 if (layer.type != LayerType.none)
+                    InkWell(
+                      onTap: () {
+                         context.read<ShowState>().updateLayer(
+                           target: target,
+                           type: LayerType.none,
+                           path: null,
+                           effect: null
+                         );
+                      },
+                      borderRadius: BorderRadius.circular(12),
+                      child: Padding(
+                        padding: const EdgeInsets.all(4.0),
+                        child: const Icon(Icons.close, size: 14, color: Colors.white38),
+                      ),
+                    )
+              ],
             ),
             
             const SizedBox(height: 8),
             
-            // Opacity Slider (Only if selected or always?)
-            // "adjust transparency level for each layer" -> User wants it accessible.
+            // Opacity Slider
             Row(
               children: [
                 const Icon(Icons.opacity, size: 12, color: Colors.white38),

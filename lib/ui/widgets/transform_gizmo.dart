@@ -29,10 +29,14 @@ class TransformGizmo extends StatefulWidget {
     this.isSelected = true,
     this.showOutline = true, // NEW
     this.contentSize, // Optional Override
+    this.onInteractionStart,
+    this.onInteractionEnd,
   });
 
   final Size? contentSize;
   final bool showOutline;
+  final VoidCallback? onInteractionStart;
+  final VoidCallback? onInteractionEnd;
 
   @override
   State<TransformGizmo> createState() => _TransformGizmoState();
@@ -48,6 +52,7 @@ class _TransformGizmoState extends State<TransformGizmo> {
 
 
   void _onPanStart(DragStartDetails details) {
+    widget.onInteractionStart?.call();
     _dragStart = details.globalPosition;
     _initialTransform = widget.transform; 
   }
@@ -147,6 +152,18 @@ class _TransformGizmoState extends State<TransformGizmo> {
      ));
   }
 
+  void _onPanEnd(DragEndDetails details) {
+     widget.onInteractionEnd?.call();
+     _dragStart = null;
+     _initialTransform = null;
+  }
+  
+  void _onPanCancel() {
+     widget.onInteractionEnd?.call();
+     _dragStart = null;
+     _initialTransform = null;
+  }
+
 
   
   void _onScaleUpdate(DragUpdateDetails details, Alignment handleAlignment) {
@@ -217,55 +234,13 @@ class _TransformGizmoState extends State<TransformGizmo> {
          // Current simple approach used previously:
          
          double dS = 0;
-         if (handleAlignment.x != 0 && handleAlignment.y != 0) {
-             // Corner: Check which dimension is "free-est" or just sum?
-             // If I drag Right/Down, both positive.
-             // If Aspect Lock, modifying Scaler should trigger proportional ScaleY.
-             
-             // Let's rely on the handle sign.
-             double signX = handleAlignment.x;
-             double signY = handleAlignment.y;
-             
-             // dSX is already corrected for sign. 
-             // LogicDelta (10, 10) on BottomRight (1, 1) -> dSX=+, dSY=+
-             // LogicDelta (10, 10) on TopLeft (-1, -1) -> dSX=-, dSY=- (Drag Right/Down shrinks)
-             
-             // If locked: dSX should roughly equal dSY * Aspect?
-             // Let's just take the average magnitude change?
-             // Or better, just apply dSX to both? 
-             
-             // User complaint: "Feels like I move mouse more than outline".
-             // This suggests scaling factor is too small.
-             // If I drag 100px, I expect edge to move 100px.
-             // Edge position = Center + (Scale * 0.5 * Width).
-             // Delta Edge = Delta Scale * 0.5 * Width.
-             // We want Delta Edge = Drag Delta.
-             // Drag Delta = Delta Scale * 0.5 * Width.
-             // Delta Scale = Drag Delta / (0.5 * Width).
-             // Delta Scale = 2 * Drag Delta / Width.
-             
-             // MY PREVIOUS FORMULA: dScale = Delta / Width.
-             // This is off by factor of 2! 
-             // Because Pivot is Center, moving one edge 10px grows width by 20px (if symmetric) 
-             // OR grows width by 10px but center shifts 5px.
-             
-             // IF ANCHORED SCALING (Corner Fixed):
-             // Width grows by 10px.
-             // So dScale = 10 / Width.
-             // This matches my formula. 
-             // BUT, does the visual edge move 10px? 
-             // Visual Edge = Center + 0.5 * Scale * Width.
-             // If I am compensating center shift...
-             // New Edge = (Center + Shift) + 0.5 * (Scale + dS) * Width.
-             
-             dS = (dSX + dSY); // Basic combination
-             
-             // Check polarity match (prevent fighting)
-             if (dSX.sign != dSY.sign && dSX != 0 && dSY != 0) {
-                 // Dragging perpendicular to diagonal? Ignore?
-                 dS = dSX; // Prefer Width
-             }
-         } else {
+          if (handleAlignment.x != 0 && handleAlignment.y != 0) {
+              // Corner Handling:
+              // Average X and Y deltas to project mouse movement onto diagonal.
+              // This ensures proportionality (1:1 with diagonal movement).
+              // Summing (dSX + dSY) would double the speed (2:1).
+              dS = (dSX + dSY) / 2.0;
+          } else {
              // Side handle (not possible with current UI which only has corners)
              dS = (dSX != 0) ? dSX : dSY;
          }
@@ -297,7 +272,7 @@ class _TransformGizmoState extends State<TransformGizmo> {
       if (handleAlignment.y != 0) localShiftY *= handleAlignment.y;
       
       if (widget.lockAspect) {
-          // If locked, we need to enforce anchor on the stationary corner.
+          // Actually, I'll VIEW file first.
           // Handle TopRight -> Anchor BottomLeft.
           // Shift X moves Right (+). Shift Y moves Up (-).
           // handleX=1, handleY=-1.
@@ -426,19 +401,14 @@ class _TransformGizmoState extends State<TransformGizmo> {
     
     return LayoutBuilder(
       builder: (context, constraints) {
-          double pX = 0;
-          double pY = 0;
+          // Fixed Padding Buffer for Handles (allows hit testing outside content)
+          // Increased to 400 to ensure handles (radius ~200) stay inside bounds
+          const double handlePadding = 400.0;
           
-          if (widget.contentSize != null) {
-              pX = (constraints.maxWidth - widget.contentSize!.width) / 2;
-              pY = (constraints.maxHeight - widget.contentSize!.height) / 2;
-              if (pX < 0) pX = 0;
-              if (pY < 0) pY = 0;
-          }
-          final double padX = pX;
-          final double padY = pY;
+          final double padX = handlePadding;
+          final double padY = handlePadding;
     
-          return Stack(
+           return Stack(
           alignment: Alignment.center,
           clipBehavior: Clip.none,
           children: [
@@ -449,17 +419,27 @@ class _TransformGizmoState extends State<TransformGizmo> {
                     ..rotateZ(t.rotation * pi / 180)
                     ..scale(t.scaleX, t.scaleY),
                   alignment: Alignment.center,
-                    child: Stack(
-                      clipBehavior: Clip.none,
-                      children: [
-                         // LAYER 1: Video Content (Background)
-                         Padding(
-                           padding: EdgeInsets.symmetric(horizontal: padX, vertical: padY),
-                           child: KeyedSubtree(
-                             key: _contentKey,
-                             child: widget.child,
-                           ),
-                         ),
+                  child: OverflowBox(
+                    maxWidth: (widget.contentSize?.width ?? 0) + (handlePadding * 2),
+                    maxHeight: (widget.contentSize?.height ?? 0) + (handlePadding * 2),
+                    minWidth: (widget.contentSize?.width ?? 0) + (handlePadding * 2),
+                    minHeight: (widget.contentSize?.height ?? 0) + (handlePadding * 2),
+                    alignment: Alignment.center,
+                    child: SizedBox(
+                      width: (widget.contentSize?.width ?? 0) + (handlePadding * 2),
+                      height: (widget.contentSize?.height ?? 0) + (handlePadding * 2),
+                       child: Stack(
+                         clipBehavior: Clip.none,
+                         children: [
+                            // LAYER 1: Video Content (Background)
+                            // Centered within the padded box
+                            Positioned(
+                              left: padX, top: padY, right: padX, bottom: padY,
+                              child: KeyedSubtree(
+                                key: _contentKey,
+                                child: widget.child,
+                              ),
+                            ),
                          
                          // LAYER 2: Pan Handler (Covers video + padding)
                          // Captures drag events for Pan, blocking video controls if they conflict
@@ -476,6 +456,8 @@ class _TransformGizmoState extends State<TransformGizmo> {
                             ..._buildStandardUI(t, padX, padY),
                       ],
                     ),
+                  ),
+                ),
               ),
           ],
         );
@@ -517,12 +499,16 @@ class _TransformGizmoState extends State<TransformGizmo> {
                 // Crop Rect Border - Explicit Opaque Hit Test
                 Positioned(
                   left: cx, top: cy, width: cw, height: ch,
-                  child: GestureDetector(
-                    onPanStart: _onPanStart,
-                    onPanUpdate: _onTranslateUpdate, 
-                    behavior: HitTestBehavior.opaque, // Ensures we catch the drag
-                    child: Container(
-                      decoration: BoxDecoration(
+                    child: GestureDetector(
+                     onPanStart: (d) {
+                       _onPanStart(d);
+                     },
+                     onPanUpdate: _onTranslateUpdate, 
+                     onPanEnd: _onPanEnd,
+                     onPanCancel: _onPanCancel,
+                     behavior: HitTestBehavior.opaque, // Ensures we catch the drag
+                     child: Container(
+                       decoration: BoxDecoration(
                         border: Border.all(color: Colors.white, width: 2.0),
                         color: Colors.transparent, 
                       ),
@@ -546,12 +532,14 @@ class _TransformGizmoState extends State<TransformGizmo> {
   Widget _buildPanHandler() {
       return Positioned.fill(
          child: Listener(
-           onPointerDown: (_) => debugPrint("Gizmo: POINTER DOWN!"),
-           onPointerUp: (_) => debugPrint("Gizmo: POINTER UP!"),
+           onPointerDown: null,
+           onPointerUp: null,
            child: GestureDetector(
              behavior: HitTestBehavior.opaque, // FORCE OPAQUE capture
-             onPanStart: (d) { debugPrint("Gizmo: PanStart"); _onPanStart(d); },
+             onPanStart: _onPanStart,
              onPanUpdate: _onTranslateUpdate,
+             onPanEnd: _onPanEnd,
+             onPanCancel: _onPanCancel,
              onDoubleTap: widget.onDoubleTap,
              child: Container(color: Colors.transparent),  
            ),
@@ -600,8 +588,7 @@ class _TransformGizmoState extends State<TransformGizmo> {
      if (globalScale == 0) globalScale = 1.0;
      
      // UN-SCALE Logic:
-     // Visual Size = LogicSize * LocalScale * GlobalScale.
-     // We want Visual Size = 48.
+     // Visual Size = 48.
      // LogicSize = 48 / (GlobalScale).
      // Note: Handles are OUTSIDE the transform, so we do NOT divide by sX/sY.
      
@@ -618,6 +605,8 @@ class _TransformGizmoState extends State<TransformGizmo> {
        child: GestureDetector(
          onPanStart: _onPanStart,
          onPanUpdate: (d) => _onScaleUpdate(d, align), 
+         onPanEnd: _onPanEnd,
+         onPanCancel: _onPanCancel,
          behavior: HitTestBehavior.opaque,
          child: Container(
            width: w,
@@ -654,6 +643,8 @@ class _TransformGizmoState extends State<TransformGizmo> {
          behavior: HitTestBehavior.opaque,
          onPanStart: _onPanStart,
          onPanUpdate: (d) => _onScaleUpdate(d, align),
+         onPanEnd: _onPanEnd,
+         onPanCancel: _onPanCancel,
          child: Container(
            width: (200.0 / globalScale),
            height: (200.0 / globalScale),

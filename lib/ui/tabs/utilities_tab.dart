@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import '../widgets/glass_container.dart';
-import '../panels/device_discovery_panel.dart';
+import '../panels/controller_discovery_panel.dart';
 
 class UtilitiesTab extends StatefulWidget {
   const UtilitiesTab({super.key});
@@ -29,15 +29,15 @@ class _UtilitiesTabState extends State<UtilitiesTab> {
             child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-               Text("LAYOUT", style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
+               Text("CONTROLLER", style: TextStyle(color: Colors.white.withOpacity(0.5), fontSize: 12, letterSpacing: 1.2, fontWeight: FontWeight.bold)),
                const SizedBox(height: 20),
 
                // Navigation Buttons
                _buildNavButton(
                  index: 0,
                  icon: Icons.search,
-                 label: "Device Discovery",
-                 description: "Scan KiNET v2 Devices"
+                 label: "Controller Discovery",
+                 description: "Scan KiNET v2 Controllers"
                ),
                const SizedBox(height: 12),
                _buildNavButton(

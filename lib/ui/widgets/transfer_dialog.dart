@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:kinet_composer/models/show_manifest.dart';
@@ -21,20 +22,22 @@ class _TransferDialogState extends State<TransferDialog> {
   
   // Use a local list to accumulate discovered devices
   final List<Fixture> _discoveredPlayers = [];
+  StreamSubscription<Fixture>? _scanSub; // Added StreamSubscription
 
   @override
   void initState() {
     super.initState();
-    // Start discovery
     final discovery = context.read<DiscoveryService>();
-    discovery.deviceStream.listen((player) {
-      if (!_discoveredPlayers.any((p) => p.ip == player.ip)) {
+    // Start Discovery
+    discovery.startDiscovery();
+    _scanSub = discovery.controllerStream.listen((player) {
+       if (!mounted) return;
+       if (!_discoveredPlayers.any((p) => p.ip == player.ip)) {
         setState(() {
           _discoveredPlayers.add(player);
         });
       }
     });
-    discovery.startDiscovery();
   }
 
   @override

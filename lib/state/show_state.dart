@@ -11,6 +11,10 @@ import '../models/media_transform.dart';
 import '../models/layer_config.dart';
 import '../models/media_transform.dart';
 import '../services/effect_service.dart';
+import 'package:flutter/material.dart'; // For TimeOfDay
+import 'dart:async';
+import 'package:sunrise_sunset_calc/sunrise_sunset_calc.dart';
+import '../models/schedule_config.dart';
 
 // Export LayerTarget for convenience
 export '../models/layer_config.dart' show LayerTarget;
@@ -25,18 +29,48 @@ class ShowState extends ChangeNotifier {
   double? get overrideTime => _overrideTime;
 
   // View State (Global)
-  bool _isLayoutLocked = false;
-  bool get isLayoutLocked => _isLayoutLocked;
+  bool _isGridLocked = false;
+  bool get isGridLocked => _isGridLocked;
+  
+  // Transport State (Global)
+  bool _isPlaying = false;
+  bool get isPlaying => _isPlaying;
 
   ShowState() {
      _initNewShow();
+     // Check schedule every minute
+     _scheduleTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
+        _checkSchedule();
+     });
   }
 
-  void setLayoutLock(bool locked) {
-     if (_isLayoutLocked != locked) {
-        _isLayoutLocked = locked;
-        notifyListeners();
-     }
+  Timer? _scheduleTimer;
+
+  @override
+  void dispose() {
+    _scheduleTimer?.cancel();
+    super.dispose();
+  }
+
+  void setGridLock(bool locked) {
+     _isGridLocked = locked;
+     notifyListeners();
+  }
+
+  void setPlaying(bool playing) {
+     if (_isPlaying == playing) return;
+     _isPlaying = playing;
+     notifyListeners();
+  }
+
+  // Pixel Mapping System
+  bool _isPixelMappingEnabled = false;
+  bool get isPixelMappingEnabled => _isPixelMappingEnabled;
+
+  void setPixelMapping(bool enabled) {
+    if (_isPixelMappingEnabled == enabled) return;
+    _isPixelMappingEnabled = enabled;
+    notifyListeners();
   }
 
   void setOverrideTime(double? t) {
@@ -62,25 +96,11 @@ class ShowState extends ChangeNotifier {
   }
 
   void _initNewShow() {
-    // Generate default 300x200 Matrix
-    final pixels = _generatePixels(300, 200, "matrix-1");
-
     _currentShow = ShowManifest(
       version: 1,
       name: 'New Show',
       mediaFile: '',
-      fixtures: [
-         Fixture(
-            id: "matrix-1",
-            name: "Matrix",
-            ip: "192.168.1.100",
-            port: 6038,
-            protocol: "KiNET v2",
-            width: 300,
-            height: 200,
-            pixels: pixels
-         )
-      ],
+      fixtures: [],
       settings: PlaybackSettings(loop: true, autoPlay: true),
       backgroundLayer: const LayerConfig(),
       middleLayer: const LayerConfig(),
@@ -119,40 +139,53 @@ class ShowState extends ChangeNotifier {
         _initNewShow();
         
         // 2. LOAD NEW STATE
-        final content = await file.readAsString();
+        final bytes = await file.readAsBytes();
+        String content;
+        // Check BOM for UTF-16LE (FF FE)
+        if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+           final codes = <int>[];
+           for (int i = 2; i < bytes.length - 1; i += 2) {
+              codes.add(bytes[i] | (bytes[i + 1] << 8));
+           }
+           content = String.fromCharCodes(codes);
+        } else {
+           try {
+              content = utf8.decode(bytes);
+           } catch (_) {
+              content = String.fromCharCodes(bytes);
+           }
+        }
         final json = jsonDecode(content);
         final loadedShow = ShowManifest.fromJson(json);
 
         // 3. INITIALIZE MATRIX FROM FILE
-        // Check if loaded show has a matrix fixture and ensure it's set up correctly
+        // Check if loaded show has fixtures with missing pixels (common in compact saves) and regen them
         List<Fixture> fixtures = loadedShow.fixtures;
-        if (fixtures.isNotEmpty) {
-           final mx = fixtures.first;
-           // If pixels are missing but dims exist (common in some saves), regen them
-           if (mx.pixels.isEmpty && mx.width > 0 && mx.height > 0) {
-              final newPixels = _generatePixels(mx.width, mx.height, mx.id);
-              fixtures[0] = Fixture(
-                 id: mx.id, 
-                 name: mx.name, 
-                 ip: mx.ip, 
-                 port: mx.port, 
-                 protocol: mx.protocol, 
-                 width: mx.width, 
-                 height: mx.height, 
-                 pixels: newPixels
-              );
+        for (int i = 0; i < fixtures.length; i++) {
+           final f = fixtures[i];
+           if (f.pixels.isEmpty && f.width > 0 && f.height > 0) {
+              final newPixels = _generatePixels(f.width, f.height, f.id);
+              fixtures[i] = f.copyWith(pixels: newPixels);
            }
         }
         
+        // Derive name from filename to ensure sync
+        String filename = file.path.split(Platform.pathSeparator).last;
+        if (filename.contains('.')) {
+          filename = filename.substring(0, filename.lastIndexOf('.'));
+        }
+
         _currentShow = ShowManifest(
            version: loadedShow.version,
-           name: loadedShow.name,
+           name: filename,
            mediaFile: loadedShow.mediaFile,
            fixtures: fixtures,
            settings: loadedShow.settings,
            backgroundLayer: loadedShow.backgroundLayer,
            middleLayer: loadedShow.middleLayer,
            foregroundLayer: loadedShow.foregroundLayer,
+           layoutWidth: loadedShow.layoutWidth,
+           layoutHeight: loadedShow.layoutHeight,
         );
         
         _currentFile = file;
@@ -171,10 +204,10 @@ class ShowState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> saveShow() async {
+  Future<void> saveShow({bool forceDialog = false}) async {
     if (_currentShow == null) return;
 
-    if (_currentFile == null) {
+    if (_currentFile == null || forceDialog) {
       final path = await FilePicker.platform.saveFile(
         dialogTitle: 'Save Show',
         fileName: 'myshow.kshow',
@@ -195,6 +228,25 @@ class ShowState extends ChangeNotifier {
   Future<void> saveShowAs(String path) async {
      if (_currentShow == null) return;
      
+     // Update Show Name from Filename
+     String filename = path.split(Platform.pathSeparator).last;
+     if (filename.contains('.')) {
+       filename = filename.substring(0, filename.lastIndexOf('.'));
+     }
+
+     _currentShow = ShowManifest(
+        version: _currentShow!.version,
+        name: filename,
+        mediaFile: _currentShow!.mediaFile,
+        fixtures: _currentShow!.fixtures,
+        settings: _currentShow!.settings,
+        backgroundLayer: _currentShow!.backgroundLayer,
+        middleLayer: _currentShow!.middleLayer,
+        foregroundLayer: _currentShow!.foregroundLayer,
+        layoutWidth: _currentShow!.layoutWidth,
+        layoutHeight: _currentShow!.layoutHeight,
+     );
+
      final file = File(path);
      final json = _currentShow!.toJson();
      final content = const JsonEncoder.withIndent('  ').convert(json);
@@ -391,13 +443,166 @@ class ShowState extends ChangeNotifier {
      notifyListeners();
   }
 
-  void updateLayoutBounds(double width, double height) {
+  void updateGridBounds(double w, double h) {
      if (_currentShow == null) return;
-     if (_currentShow!.layoutWidth == width && _currentShow!.layoutHeight == height) return;
+     if (_currentShow!.layoutWidth == w && _currentShow!.layoutHeight == h) return;
      
-     _currentShow = _currentShow!.copyWith(layoutWidth: width, layoutHeight: height);
+     _currentShow = _currentShow!.copyWith(layoutWidth: w, layoutHeight: h);
      _isModified = true;
      notifyListeners();
+  }
+
+  void updateFixture(Fixture fixture) {
+    if (_currentShow == null) return;
+    final index = _currentShow!.fixtures.indexWhere((f) => f.id == fixture.id);
+    if (index == -1) return;
+
+    List<Fixture> newFixtures = List.from(_currentShow!.fixtures);
+    newFixtures[index] = fixture;
+
+    _currentShow = _currentShow!.copyWith(fixtures: newFixtures);
+    _isModified = true;
+    notifyListeners();
+  }
+  
+  void addFixture(Fixture fixture) {
+     if (_currentShow == null) return;
+     List<Fixture> newFixtures = List.from(_currentShow!.fixtures);
+     newFixtures.add(fixture);
+      _currentShow = _currentShow!.copyWith(fixtures: newFixtures);
+      _isModified = true;
+      notifyListeners();
+  }
+  
+  void removeFixture(String id) {
+     if (_currentShow == null) return;
+     List<Fixture> newFixtures = List.from(_currentShow!.fixtures);
+     newFixtures.removeWhere((f) => f.id == id);
+      _currentShow = _currentShow!.copyWith(fixtures: newFixtures);
+      _isModified = true;
+      notifyListeners();
+  }
+
+  // --- SCHEDULER LOGIC ---
+  void updateSchedule(ScheduleConfig config) {
+    if (_currentShow == null) return;
+    _currentShow = _currentShow!.copyWith(schedule: config);
+    _isModified = true;
+    notifyListeners();
+    
+    // Force immediate check
+    _checkSchedule();
+  }
+
+  void _checkSchedule() {
+     if (_currentShow == null) return;
+     final schedule = _currentShow!.schedule;
+
+     // 1. If Indefinite, do nothing (User controls play/pause)
+     if (schedule.type == ScheduleType.indefinite) return;
+
+     // 2. Scheduled Mode
+     final now = DateTime.now();
+     
+     // A. Check Day of Week
+     // Monday = 1, Sunday = 7. List is 0-indexed (Mon-Sun)
+     final dayIndex = now.weekday - 1; // 0 = Mon, 6 = Sun
+     if (dayIndex < 0 || dayIndex >= schedule.enabledDays.length || !schedule.enabledDays[dayIndex]) {
+        // Today is disabled. Stop if playing.
+        if (_isPlaying) {
+           setPlaying(false);
+           debugPrint("Scheduler: Stopping (Day Disabled)");
+        }
+        return;
+     }
+
+     // B. Calculate Times
+     // Default Location: New York (Approx) if not set. 
+     // Ideally we'd ask user or use IP geolocation, but for now hardcoded fallback is safer than crash.
+     final double lat = schedule.latitude ?? 40.7128;
+     final double lng = schedule.longitude ?? -74.0060;
+
+     DateTime? getSunrise(DateTime date, double lat, double lng) {
+        final result = getSunriseSunset(lat, lng, const Duration(hours: 0), date);
+        return result.sunrise;
+     }
+
+     DateTime? getSunset(DateTime date, double lat, double lng) {
+        final result = getSunriseSunset(lat, lng, const Duration(hours: 0), date);
+        return result.sunset;
+     }
+
+     DateTime getTriggerTime(ScheduleTrigger trigger, TimeOfDay? specific, int offset) {
+        DateTime base;
+        if (trigger == ScheduleTrigger.specific) {
+           base = DateTime(now.year, now.month, now.day, specific!.hour, specific.minute);
+        } else if (trigger == ScheduleTrigger.sunrise) {
+           base = getSunrise(now, lat, lng) ?? DateTime(now.year, now.month, now.day, 6, 0);
+        } else { // Sunset
+           base = getSunset(now, lat, lng) ?? DateTime(now.year, now.month, now.day, 18, 0);
+        }
+        return base.add(Duration(minutes: offset));
+     }
+
+     final startTime = getTriggerTime(schedule.startTrigger, schedule.startTime, schedule.startOffsetMinutes);
+     final endTime = getTriggerTime(schedule.endTrigger, schedule.endTime, schedule.endOffsetMinutes);
+
+     // Handle overnight logic (Start 10PM, End 5AM)
+     bool isOvernight = endTime.isBefore(startTime);
+     if (isOvernight) {
+        // If it's overnight, we are "active" if:
+        // NOW > Start (Before midnight) OR NOW < End (After midnight)
+        // Adjust endTime to tomorrow for comparison if currently PM? 
+        // Or adjust startTime to yesterday if currently AM?
+        
+        // Simpler: 
+        // Is Active = (Now >= Start) || (Now < End)
+        // Check strict inequality?
+        // Using "isAfter" and "isBefore"
+        bool afterStart = now.isAfter(startTime) || now.isAtSameMomentAs(startTime);
+        bool beforeEnd = now.isBefore(endTime); // This endTime is "Today's" end time instance (e.g. 5am today)
+        
+        // If Schedule is 10PM -> 5AM. 
+        // If Now is 11PM. Start(Today 10PM). End(Today 5AM).
+        // 11PM > 10PM (True). 11PM < 5AM (False). OR => True. Correct.
+        
+        // If Now is 2AM. Start(Today 10PM). End(Today 5AM).
+        // 2AM > 10PM (False). 2AM < 5AM (True). OR => True. Correct.
+        
+        // If Now is 6AM. Start(Today 10PM). End(Today 5AM).
+        // 6AM > 10PM (False). 6AM < 5AM (False). OR => False. Correct. (Stopped)
+        
+        if (afterStart || beforeEnd) {
+           if (!_isPlaying) {
+              setPlaying(true);
+               debugPrint("Scheduler: Starting (Overnight Schedule Active)");
+           }
+        } else {
+           if (_isPlaying) {
+              setPlaying(false);
+              debugPrint("Scheduler: Stopping (Overnight Schedule Inactive)");
+           }
+        }
+
+     } else {
+        // Standard Day Schedule (e.g. 9AM -> 5PM)
+        // Start < End
+        // Active if Now > Start AND Now < End
+        bool afterStart = now.isAfter(startTime) || now.isAtSameMomentAs(startTime);
+        bool beforeEnd = now.isBefore(endTime);
+        
+        if (afterStart && beforeEnd) {
+           if (!_isPlaying) {
+              setPlaying(true);
+              debugPrint("Scheduler: Starting (Standard Schedule Active)");
+           }
+        } else {
+           if (_isPlaying) {
+              setPlaying(false);
+              debugPrint("Scheduler: Stopping (Standard Schedule Inactive)");
+           }
+        }
+     }
   }
 
   // --- BUNDLING FOR TRANSFER ---

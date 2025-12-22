@@ -37,12 +37,7 @@ class _EffectRendererState extends State<EffectRenderer> with SingleTickerProvid
   Map<String, ui.Image> _loadedImages = {};
   
   void _loadImages() {
-     if (widget.type == EffectType.lemming && !_loadedImages.containsKey('lemming')) {
-        _loadImageAsset('assets/lemming_sprite.png', 'lemming');
-     }
-     if (widget.type == EffectType.clouds && !_loadedImages.containsKey('cloud')) {
-        _loadImageAsset('assets/cloud_sprite.png', 'cloud');
-     }
+     // No images to load for current effects
   }
 
   void _loadImageAsset(String path, String key) {
@@ -74,6 +69,15 @@ class _EffectRendererState extends State<EffectRenderer> with SingleTickerProvid
         setState(() {
            _time = widget.initialTime;
         });
+     }
+     
+     // React to Playing State Change
+     if (widget.isPlaying != oldWidget.isPlaying) {
+        if (widget.isPlaying) {
+           _ticker.start();
+        } else {
+           _ticker.stop();
+        }
      }
   }
 

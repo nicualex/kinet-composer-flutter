@@ -4,15 +4,35 @@ import 'package:media_kit/media_kit.dart';
 import 'package:provider/provider.dart';
 import 'package:kinet_composer/state/show_state.dart';
 import 'package:kinet_composer/services/discovery_service.dart';
+import 'package:kinet_composer/services/pixel_engine.dart';
 
-void main() {
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:kinet_composer/ui/intro_screen.dart';
+
+import 'package:bitsdojo_window/bitsdojo_window.dart';
+
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
-  runApp(const KinetComposerApp());
+  
+  final prefs = await SharedPreferences.getInstance();
+  final showIntro = prefs.getBool('show_intro') ?? true;
+  
+  runApp(KinetComposerApp(showIntro: showIntro));
+
+  doWhenWindowReady(() {
+    const initialSize = Size(1280, 720);
+    appWindow.minSize = const Size(800, 600);
+    appWindow.size = initialSize;
+    appWindow.alignment = Alignment.center;
+    appWindow.title = "LT Composer";
+    appWindow.show();
+  });
 }
 
 class KinetComposerApp extends StatelessWidget {
-  const KinetComposerApp({super.key});
+  final bool showIntro;
+  const KinetComposerApp({super.key, required this.showIntro});
 
   @override
   Widget build(BuildContext context) {
@@ -20,17 +40,32 @@ class KinetComposerApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => ShowState()),
         Provider(create: (_) => DiscoveryService()),
+        ProxyProvider<DiscoveryService, PixelEngine>(
+          update: (_, discovery, prev) => prev ?? PixelEngine(discovery),
+        ),
       ],
       child: MaterialApp(
         title: 'Kinet Composer',
         theme: ThemeData(
           useMaterial3: true,
+          fontFamily: 'Roboto', // Global default
           scaffoldBackgroundColor: Colors.transparent,
           colorScheme: ColorScheme.fromSeed(
             seedColor: const Color(0xFF6200EE),
             brightness: Brightness.dark,
             secondary: Colors.cyanAccent,
             surface: const Color(0x0DFFFFFF), // Very transparent white
+          ),
+          textTheme: const TextTheme(
+             // Slicker defaults
+             displayLarge: TextStyle(fontWeight: FontWeight.w300, letterSpacing: -1.5),
+             displayMedium: TextStyle(fontWeight: FontWeight.w300, letterSpacing: -0.5),
+             displaySmall: TextStyle(fontWeight: FontWeight.w400),
+             headlineMedium: TextStyle(fontWeight: FontWeight.w300),
+             headlineSmall: TextStyle(fontWeight: FontWeight.w400),
+             titleLarge: TextStyle(fontWeight: FontWeight.w500),
+             bodyLarge: TextStyle(fontWeight: FontWeight.w400),
+             bodyMedium: TextStyle(fontWeight: FontWeight.w400),
           ),
           appBarTheme: const AppBarTheme(
              backgroundColor: Colors.transparent,
@@ -52,7 +87,7 @@ class KinetComposerApp extends StatelessWidget {
             contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           ),
         ),
-        home: const HomeScreen(),
+        home: showIntro ? const IntroScreen() : const HomeScreen(),
       ),
     );
   }

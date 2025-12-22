@@ -5,11 +5,13 @@ class PixelGridPainter extends CustomPainter {
   final List<Fixture> fixtures;
   final bool drawLabels;
   final double gridSize;
+  final double opacity;
 
   PixelGridPainter({
       this.fixtures = const [], 
       this.drawLabels = true,
       this.gridSize = 10.0,
+      this.opacity = 1.0,
   });
 
   @override
@@ -20,11 +22,11 @@ class PixelGridPainter extends CustomPainter {
     // debugPrint("PixelGridPainter: Painting ${fixtures.length} fixtures");
 
     final fixturePaint = Paint()
-      ..color = Colors.blue.withValues(alpha: 0.4)
+      ..color = Colors.blue.withValues(alpha: 0.8 * opacity) // Brighter Pixels
       ..style = PaintingStyle.fill;
     
     final borderPaint = Paint()
-      ..color = Colors.green.withValues(alpha: 0.5)
+      ..color = Colors.green.withValues(alpha: 0.5 * opacity)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2.0;
 
@@ -115,6 +117,9 @@ class PixelGridPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant PixelGridPainter oldDelegate) {
-    return oldDelegate.fixtures != fixtures || oldDelegate.gridSize != gridSize;
+    return oldDelegate.fixtures != fixtures || 
+           oldDelegate.gridSize != gridSize ||
+           oldDelegate.opacity != opacity ||
+           oldDelegate.drawLabels != drawLabels;
   }
 }

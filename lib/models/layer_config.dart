@@ -58,15 +58,30 @@ class LayerConfig {
   }
 
   factory LayerConfig.fromJson(Map<String, dynamic> json) {
-    return LayerConfig(
-      type: LayerType.values.firstWhere(
-        (e) => e.name == (json['type'] as String? ?? 'none'),
+    // 1. Initial Type Parsing (Case-Insensitive)
+    var parsedType = LayerType.values.firstWhere(
+        (e) => e.name.toLowerCase() == (json['type'] as String? ?? 'none').toLowerCase(),
         orElse: () => LayerType.none,
-      ),
-      path: json['path'] as String?,
-      effect: json['effect'] != null
+    );
+
+    // 2. Inference Fallback for Legacy Files
+    final path = json['path'] as String?;
+    final effectName = json['effect'] as String?;
+
+    if (parsedType == LayerType.none) {
+       if (path != null && path.isNotEmpty) {
+          parsedType = LayerType.video;
+       } else if (effectName != null && effectName.isNotEmpty) {
+          parsedType = LayerType.effect;
+       }
+    }
+
+    return LayerConfig(
+      type: parsedType,
+      path: path,
+      effect: effectName != null
           ? EffectType.values.firstWhere(
-              (e) => e.name == (json['effect'] as String),
+              (e) => e.name.toLowerCase() == effectName.toLowerCase(),
               orElse: () => EffectType.rainbow,
             )
           : null,

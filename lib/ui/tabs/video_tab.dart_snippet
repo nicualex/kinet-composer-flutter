@@ -1,0 +1,38 @@
+  void _onMouseWheel(PointerScrollEvent event) {
+    if (event.scrollDelta.dy == 0) return;
+
+    final double scaleChange = event.scrollDelta.dy < 0 ? 1.1 : 0.9;
+    final double currentScale = _zoomController.value.getMaxScaleOnAxis();
+    final double targetScale = currentScale * scaleChange;
+
+    // Clamp Zoom
+    if (targetScale < 0.1 || targetScale > 5.0) return;
+
+    // Zoom around the mouse position
+    final Offset scenePoint = _zoomController.toScene(event.localPosition);
+    final Matrix4 matrix = Matrix4.identity()
+      ..translate(event.localPosition.dx, event.localPosition.dy)
+      ..scale(scaleChange)
+      ..translate(-scenePoint.dx, -scenePoint.dy);
+
+    setState(() {
+       _zoomController.value = matrix;
+       // Or usually:
+       // _zoomController.value = _zoomController.value.multiplied(matrix)? 
+       // No, simpler: 
+       // Just multiply the current matrix by a scaling matrix centered on touch?
+    });
+    
+    // Better Implementation:
+    // Update the matrix directly
+    final Matrix4 translation = _zoomController.value;
+    final Offset focalPoint = event.localPosition;
+    
+    // Translate -> Scale -> Translate Back
+    final Matrix4 scaleMat = Matrix4.identity()
+      ..translate(focalPoint.dx, focalPoint.dy)
+      ..scale(scaleChange)
+      ..translate(-focalPoint.dx, -focalPoint.dy);
+      
+    _zoomController.value = scaleMat * translation;
+  }

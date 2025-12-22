@@ -16,6 +16,7 @@ dependencies:
   # UI
   cupertino_icons: ^1.0.2
   window_manager: ^0.5.1 # For desktop window control
+  bitsdojo_window: ^0.1.6 # Custom Window Title Bar
   
   # Logic
   path_provider: ^2.0.0
@@ -32,6 +33,7 @@ dependencies:
   media_kit_libs_video: ^1.0.5
   archive: ^4.0.7
   flutter_colorpicker: ^1.1.0
+  sunrise_sunset_calc: ^3.0.0
 
 
 dev_dependencies:
