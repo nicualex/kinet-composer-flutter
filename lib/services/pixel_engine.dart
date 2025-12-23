@@ -28,6 +28,7 @@ class PixelEngine {
   bool _isRunning = false;
   Timer? _timer;
   bool _isProcessing = false;
+  int _lastFrameTime = 0;
   
   // Overload Warning (True if frames are being dropped)
   final ValueNotifier<bool> overloadWarning = ValueNotifier(false);
@@ -72,8 +73,9 @@ class PixelEngine {
        await _processor.start(_sender.isolateSendPort!);
     }
     
-    // 30 FPS = ~33ms
-    _timer = Timer.periodic(const Duration(milliseconds: 33), _onTick);
+    print("PixelEngine: STARTED. Performance Mode: 15FPS, 0.05 Scale (Ultra-Fast).");
+    // Run loop at 60Hz, but throttle inside _onTick
+    _timer = Timer.periodic(const Duration(milliseconds: 16), _onTick);
   }
 
   void stop() {
@@ -95,58 +97,40 @@ class PixelEngine {
     
     if (overloadWarning.value) overloadWarning.value = false;
     
+
+    // Throttling: Cap at 15 FPS (66ms) - Give UI thread breathing room!
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastFrameTime < 66) return;
+    _lastFrameTime = now;
+    
     _isProcessing = true;
     final stopwatch = Stopwatch()..start();
     try {
-      // 1. Capture Frame (High Performance Scale)
-      final double scale = 0.2; // 5x Downscale = 25x less data
+      // 1. Capture Frame
+      final double scale = 0.05; // 20x Downscale for Max Speed
       final image = await _captureFrame(scale);
       
-      // 2. Crop & Sample
       if (image != null) {
-        // Rebuild map if needed
-        if (_pixelInstructions == null) _rebuildPixelMap(scale);
-        
-        Rect cropRect = Rect.fromLTRB(
-           _renderBounds.left * scale, 
-           _renderBounds.top * scale, 
-           _renderBounds.right * scale, 
-           _renderBounds.bottom * scale
-        );
-        
-        final imageRect = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
-        cropRect = cropRect.intersect(imageRect);
-
-        ui.Image samplingImage = image;
-        bool disposedOriginal = false;
-
-        if (cropRect.width > 0 && cropRect.height > 0) {
-            final recorder = ui.PictureRecorder();
-            final canvas = Canvas(recorder, cropRect); 
-            canvas.translate(-cropRect.left, -cropRect.top);
-            canvas.drawImage(image, Offset.zero, Paint());
-            final picture = recorder.endRecording();
-            samplingImage = await picture.toImage(cropRect.width.toInt(), cropRect.height.toInt());
-            
-            image.dispose();
-            disposedOriginal = true;
-        } else {
-            image.dispose();
-            return;
-        }
-
-        await _sampleAndSendFast(samplingImage, cropRect.topLeft.dx.toInt(), cropRect.topLeft.dy.toInt());
-        samplingImage.dispose();
-        if (!disposedOriginal) image.dispose();
+          final tCapture = stopwatch.elapsedMilliseconds;
+          
+          final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+          final tByteData = stopwatch.elapsedMilliseconds - tCapture;
+          
+          if (byteData != null) {
+              final transferable = TransferableTypedData.fromList([byteData.buffer.asUint8List()]);
+              _processor.processFrame(transferable, image.width, image.width * 4, 0, 0);
+              
+              if (stopwatch.elapsedMilliseconds > 20) {
+                 print("PixelEngine: Cap=${tCapture}ms Bytes=${tByteData}ms Total=${stopwatch.elapsedMilliseconds}ms");
+              }
+          }
+          image.dispose();
       }
     } catch (e) {
        print("PixelEngine Error: $e");
     } finally {
-      _isProcessing = false;
-      if (stopwatch.elapsedMilliseconds > 20) {
-         print("PixelEngine Slow Frame: ${stopwatch.elapsedMilliseconds}ms");
-      }
-      stopwatch.stop();
+       _isProcessing = false;
+       stopwatch.stop();
     }
   }
 
@@ -171,6 +155,8 @@ class PixelEngine {
     final height = image.height;
     final int stride = width * 4;
     
+    // PROBE END
+    
     if (_pixelInstructions == null) return;
     
     // Offload to Persistent Isolate (Zero Copy)
@@ -179,10 +165,7 @@ class PixelEngine {
     
     final tLoop = sw.elapsedMilliseconds - tRead;
     
-    // Performance Log
-    if (sw.elapsedMilliseconds > 25) {
-       print("PixelEngine: Read=${tRead}ms Loop=${tLoop}ms (Async Pushed)");
-    }
+
     sw.stop();
   }
 
@@ -206,10 +189,27 @@ class PixelEngine {
     Map<String, int> bufferMap = {};
     List<BufferConfig> bufferConfigs = [];
     
+    const double kGridSize = 16.0; // Stride MUST match Setup/Video Tab visuals
+    
     for (var fixture in _manifest!.fixtures) {
        for (var pixel in fixture.pixels) {
-          double gx = fixture.x + pixel.x;
-          double gy = fixture.y + pixel.y;
+          // Apply Stride
+          final px = pixel.x * kGridSize;
+          final py = pixel.y * kGridSize;
+           
+          // Apply Rotation (Degrees to Radians)
+          // standard 2D rotation: x' = x cos - y sin, y' = x sin + y cos
+          final rad = fixture.rotation * (pi / 180.0);
+          final cosT = cos(rad);
+          final sinT = sin(rad);
+           
+          // Rotate around Fixture Origin (Top-Left)
+          // Since px, py are offsets from origin, we just rotate them
+          final rx = (px * cosT) - (py * sinT);
+          final ry = (px * sinT) + (py * cosT);
+
+          double gx = fixture.x + rx;
+          double gy = fixture.y + ry;
           
           if (gx < minX) minX = gx;
           if (gx > maxX) maxX = gx;
@@ -228,28 +228,6 @@ class PixelEngine {
           } else {
              bufIdx = _dmxBuffers.length;
              bufferMap[key] = bufIdx;
-             
-             // Allocate 530 bytes (18 Header + 512 Data)
-             final buf = Uint8List(530);
-             
-             // Pre-fill KiNET v2 Header (18 bytes)
-             // Magic (4)
-             buf[0] = 0x04; buf[1] = 0x01; buf[2] = 0xdc; buf[3] = 0x4a;
-             // Ver 2 (2)
-             buf[4] = 0x02; buf[5] = 0x00;
-             // Type PortOut (2)
-             buf[6] = 0x08; buf[7] = 0x01;
-             // Seq (4) - 0
-             // Univ (4) - LE
-             int u = pixel.dmxInfo.universe;
-             buf[12] = u & 0xFF;
-             buf[13] = (u >> 8) & 0xFF;
-             buf[14] = (u >> 16) & 0xFF;
-             buf[15] = (u >> 24) & 0xFF;
-             // Port (1) - 1
-             buf[16] = 0x01;
-             // Pad (1)
-             // bufferMap[key] = bufIdx;
              
              // WE DO NOT ALLOCATE BUFFER HERE ANYMORE.
              // We just track the config.
@@ -278,6 +256,7 @@ class PixelEngine {
     } else {
        final pad = 10.0;
        _renderBounds = Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
+       
        _pixelInstructions = Int32List.fromList(instructions);
        
        // Push Config to Isolate
@@ -285,7 +264,4 @@ class PixelEngine {
     }
   }
 
-  
-
-  }
-
+}

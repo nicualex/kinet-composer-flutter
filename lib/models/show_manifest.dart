@@ -161,6 +161,8 @@ class Fixture {
   final String id;
   final String name;
   final String ip; // Target IP
+  final String macAddress; // Added
+  final String firmwareVersion; // Added
   final int port; // usually 6038
   final String protocol; // 'KinetV1' | 'KinetV2' | 'KinetV3'
   final int width; // Logical width in pixels
@@ -180,6 +182,8 @@ class Fixture {
     required this.id,
     required this.name,
     required this.ip,
+    this.macAddress = "",
+    this.firmwareVersion = "",
     required this.port,
     required this.protocol,
     required this.width,
@@ -197,6 +201,8 @@ class Fixture {
       id: json['id'] as String,
       name: json['name'] as String,
       ip: json['ip'] as String,
+      macAddress: json['macAddress'] as String? ?? "",
+      firmwareVersion: json['firmwareVersion'] as String? ?? "",
       port: json['port'] as int,
       protocol: json['protocol'] as String,
       width: json['width'] as int,
@@ -217,6 +223,8 @@ class Fixture {
       'id': id,
       'name': name,
       'ip': ip,
+      'macAddress': macAddress,
+      'firmwareVersion': firmwareVersion,
       'port': port,
       'protocol': protocol,
       'width': width,
@@ -233,6 +241,8 @@ class Fixture {
     String? id,
     String? name,
     String? ip,
+    String? macAddress,
+    String? firmwareVersion,
     int? port,
     String? protocol,
     int? width,
@@ -248,6 +258,8 @@ class Fixture {
       id: id ?? this.id,
       name: name ?? this.name,
       ip: ip ?? this.ip,
+      macAddress: macAddress ?? this.macAddress,
+      firmwareVersion: firmwareVersion ?? this.firmwareVersion,
       port: port ?? this.port,
       protocol: protocol ?? this.protocol,
       width: width ?? this.width,

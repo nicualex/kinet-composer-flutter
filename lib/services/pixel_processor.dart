@@ -29,7 +29,9 @@ class PixelProcessor {
     // Pass the DMX Sender Port to the Processor
     _sendPort!.send(DmxInitMessage(dmxSendPort));
     
-    _readyCompleter.complete();
+    if (!_readyCompleter.isCompleted) {
+       _readyCompleter.complete();
+    }
     print("Pixel Processor Isolate Started.");
   }
 
@@ -40,15 +42,10 @@ class PixelProcessor {
     _sendPort = null;
   }
 
-  /// Update the Mapping Manifest
-  /// This is expensive, but only happens when patching changes.
   void updateManifest(Int32List instructions, List<BufferConfig> buffers) {
     _sendPort?.send(ManifestUpdateMessage(instructions, buffers));
   }
 
-  /// Process a frame
-  /// Fast path!
-  /// Uses TransferableTypedData to avoid copying bytes from Main -> Isolate
   void processFrame(TransferableTypedData transferable, int width, int stride, int cropX, int cropY) {
     _sendPort?.send(FrameMessage(transferable, width, stride, cropX, cropY));
   }
@@ -61,46 +58,34 @@ class PixelProcessor {
     SendPort? dmxPort;
     Int32List? instructions;
     
-    // Internal State
-    // We hold the "Working Buffers" here to avoid allocation per frame
     List<Uint8List> dmxBuffers = [];
     List<String> bufferIps = [];
-    // We pre-build the headers, so we just need to poke the RGB data
+    
+    int frameCount = 0;
     
     await for (final msg in port) {
-       if (msg == "STOP") break;
-       
        if (msg is DmxInitMessage) {
           dmxPort = msg.dmxPort;
-       } 
+       }
+       else if (msg == "STOP") {
+          break;
+       }
        else if (msg is ManifestUpdateMessage) {
           instructions = msg.instructions;
+          print("PP: Manifest Updated. Instructions: ${instructions.length ~/ 4} pixels.");
           
-          // Re-allocate buffers based on config
           dmxBuffers.clear();
           bufferIps.clear();
           
           for (var cfg in msg.buffers) {
-             final buf = Uint8List(530); // 18 header + 512 data
-             
-             // Pre-fill KiNET v2 Header
-             // Magic (4)
-             buf[0] = 0x04; buf[1] = 0x01; buf[2] = 0xdc; buf[3] = 0x4a;
-             // Ver 2 (2)
-             buf[4] = 0x02; buf[5] = 0x00;
-             // Type PortOut (2)
-             buf[6] = 0x08; buf[7] = 0x01;
-             // Seq (4) - 0
-             // Univ (4) - LE
-             int u = cfg.universe;
-             buf[12] = u & 0xFF;
-             buf[13] = (u >> 8) & 0xFF;
-             buf[14] = (u >> 16) & 0xFF;
-             buf[15] = (u >> 24) & 0xFF;
-             // Port (1) - 1
-             buf[16] = 0x01;
-             // Pad (1)
-             // buf[17] = 0x00;
+             final buf = Uint8List(530); 
+             // Header
+             buf[0] = 0x04; buf[1] = 0x01; buf[2] = 0xdc; buf[3] = 0x4a; // Magic
+             buf[4] = 0x02; buf[5] = 0x00; // Ver 2
+             buf[6] = 0x08; buf[7] = 0x01; // PortOut
+             buf[12] = 0xFF; buf[13] = 0xFF; buf[14] = 0xFF; buf[15] = 0xFF; // Univ
+             buf[16] = 0x01; // Port
+             buf[20] = 0x00; buf[21] = 0x02; // Length 512
              
              dmxBuffers.add(buf);
              bufferIps.add(cfg.ip);
@@ -109,25 +94,27 @@ class PixelProcessor {
        else if (msg is FrameMessage) {
           if (dmxPort == null || instructions == null) continue;
           
-          // Materialize bytes (Move semantics)
+          frameCount++;
           final bytes = msg.transferable.materialize().asUint8List();
-          
           final width = msg.width;
           final stride = msg.stride;
           final cropX = msg.cropX;
           final cropY = msg.cropY;
-           // We don't need height, just robust bounds checks
           
-          final int len = instructions.length;
-          final int instrLen = len; 
-          // Assuming instructions is flat
+          // Debug 1x per sec (~30 frames)
+          bool debug = frameCount % 30 == 0;
+          if (debug) {
+             print("PP FRAME: Size=${bytes.length} W=$width Stride=$stride Crop($cropX, $cropY) Instr=${instructions.length ~/ 4}");
+          }
           
+          int executed = 0;
+          int skipped = 0;
+          
+          final int instrLen = instructions.length;
           for (int i = 0; i < instrLen; i += 4) {
              int lx = instructions[i] - cropX;
              int ly = instructions[i+1] - cropY;
              
-             // Fast bounds check? logic is complex here because we don't have height passed
-             // But we have bytes.length
              int offset = (ly * stride) + (lx * 4);
              
              if (offset >= 0 && offset + 3 < bytes.length) {
@@ -135,16 +122,26 @@ class PixelProcessor {
                  int chanIdx = instructions[i+3];
                  
                  final buf = dmxBuffers[bufIdx];
-                 int writePos = 18 + chanIdx;
+                 int writePos = 24 + chanIdx;
                  
-                  // No branching if possible
-                 buf[writePos] = bytes[offset];
-                 buf[writePos+1] = bytes[offset+1];
-                 buf[writePos+2] = bytes[offset+2];
+                 if (writePos + 2 < buf.length) {
+                    // Start of Payload is 24.
+                    buf[writePos] = bytes[offset];
+                    buf[writePos+1] = bytes[offset+1];
+                    buf[writePos+2] = bytes[offset+2];
+                    executed++;
+                 }
+             } else {
+                 skipped++;
+                 if (skipped < 5 && debug) { // Log first few skips
+                     print("PP OOB: lx:$lx ly:$ly Stride:$stride Len:${bytes.length} Offset:$offset");
+                 }
              }
           }
           
-          // Flush to Network Isolate
+          if (debug) print("PP STATS: Exec:$executed Skipped:$skipped");
+          
+          // Flush
           for (int i = 0; i < dmxBuffers.length; i++) {
               dmxPort.send([bufferIps[i], dmxBuffers[i]]);
           }

@@ -83,12 +83,16 @@ class ShowState extends ChangeNotifier {
     List<Pixel> pixels = [];
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
+        // Auto-Patch: 3 Channels per Pixel (RGB)
+        // Start Channel = 1
+        int channel = 1 + ((y * width + x) * 3);
+        
         pixels.add(Pixel(
           id: "$x:$y", 
           x: x, 
           y: y, 
           fixtureId: fixtureId, 
-          dmxInfo: DmxInfo(universe: 1, channel: 1) // Default or Auto-patch placeholder
+          dmxInfo: DmxInfo(universe: 1, channel: channel)
         ));
       }
     }
@@ -114,6 +118,9 @@ class ShowState extends ChangeNotifier {
   File? get currentFile => _currentFile;
   bool get isModified => _isModified;
   String? get fileName => _currentFile?.path.split(Platform.pathSeparator).last;
+  
+  // Convenience Getters
+  List<Fixture> get fixtures => _currentShow?.fixtures ?? [];
   
   // Helpers for RenderService/Dialog
   Fixture get matrixConfig => _currentShow?.fixtures.isNotEmpty == true ? _currentShow!.fixtures.first : Fixture(id: 'dummy', name: 'dummy', ip: '', port: 0, protocol: '', width: 100, height: 100, pixels: []); // Safe fallback

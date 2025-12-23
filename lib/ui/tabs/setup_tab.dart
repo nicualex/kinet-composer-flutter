@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:kinet_composer/state/show_state.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:kinet_composer/models/show_manifest.dart';
 import 'package:kinet_composer/services/discovery_service.dart';
 import 'package:flutter/gestures.dart'; // For PointerScrollEvent
@@ -28,6 +29,9 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
   List<NetworkInterface> _interfaces = [];
   NetworkInterface? _selectedInterface;
   StreamSubscription? _scanSub;
+  Timer? _scanTimeoutTimer;
+  Timer? _feedbackTimer; // Continuous DMX Feedback
+  static const String kPrefNetworkInterface = 'selected_network_interface';
   List<Fixture> _discoveredControllers = []; // Local cache for scanning results
   
   // Sidebar State
@@ -39,7 +43,7 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
   
   // Drag State
   Offset? _dragStartPos;
-  Offset? _lastLocalPos;
+
   Offset _dragAccumulator = Offset.zero;
   
   String? _selectedFixtureId;
@@ -67,9 +71,7 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
   bool _isEditingProperties = false;
   final TextEditingController _nameCtrl = TextEditingController();
   final TextEditingController _ipCtrl = TextEditingController();
-  final TextEditingController _dmxCtrl = TextEditingController();
-  final TextEditingController _univCtrl = TextEditingController();
-  final TextEditingController _rotCtrl = TextEditingController();
+
 
   @override
   void initState() {
@@ -113,7 +115,23 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
       if (mounted) {
         setState(() {
           _interfaces = list;
-          if (_interfaces.isNotEmpty) _selectedInterface = _interfaces.first;
+          _interfaces = list;
+          
+          if (_interfaces.isNotEmpty) {
+             _selectedInterface = _interfaces.first; // Default
+             
+             // Restore Preference
+             SharedPreferences.getInstance().then((prefs) {
+                final savedName = prefs.getString(kPrefNetworkInterface);
+                if (savedName != null && mounted) {
+                   try {
+                      final found = _interfaces.firstWhere((i) => i.name == savedName);
+                      setState(() => _selectedInterface = found);
+                      debugPrint("Restored Network Interface: ${found.name}");
+                   } catch (_) {}
+                }
+             });
+          }
         });
       }
     } catch (e) {
@@ -123,18 +141,14 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
 
   @override
   void dispose() {
-    // Stop Scan (Manual cleanup to avoid setState in dispose)
-    _discoveryService.stopDiscovery();
+    _scanTimeoutTimer?.cancel();
+    _feedbackTimer?.cancel();
     _scanSub?.cancel();
-    
     _transformationController.dispose();
-    // Controllers removed
-    _transformationController.dispose();
+    _discoveryService.dispose();
     _nameCtrl.dispose();
     _ipCtrl.dispose();
-    _dmxCtrl.dispose();
-    _univCtrl.dispose();
-    _rotCtrl.dispose();
+
     super.dispose();
   }
 
@@ -149,39 +163,163 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
 
     setState(() {
        _isScanning = true;
-       _discoveredControllers.clear();
     });
     
-    await _discoveryService.startDiscovery(interfaceIp: bindIp);
+    // Auto-Stop Timer (30 seconds)
+    _scanTimeoutTimer?.cancel();
+    _scanTimeoutTimer = Timer(const Duration(seconds: 30), () {
+       if (mounted && _isScanning) {
+          debugPrint("Scan Timeout (30s). Stopping.");
+          _stopScan();
+       }
+    });
     
-    // Listen to controller stream
+    // Listen to controller stream BEFORE starting discovery to catch early responses
     _scanSub?.cancel();
     _scanSub = _discoveryService.controllerStream.listen((device) {
        if (!mounted) return;
-       setState(() {
-             // Deduplicate based on IP
-          if (!_discoveredControllers.any((d) => d.ip == device.ip)) {
-             // Default Position: 
-             final positionedDevice = device.copyWith(
-                id: "${device.ip}-${DateTime.now().millisecondsSinceEpoch}", // Ensure Unique ID
-                x: (_discoveredControllers.length * kStride * 2),
-                y: 160.0, // Default Y in bounds
-             );
-             _discoveredControllers.add(positionedDevice);
-             debugPrint("Discovered: ${positionedDevice.name} @ ${positionedDevice.ip}");
-          }
-       });
+       
+       // Populate local discovery list for Polling
+       final discIdx = _discoveredControllers.indexWhere((d) => d.id == device.id);
+       bool localListChanged = false;
+       
+       if (discIdx == -1) {
+           _discoveredControllers.add(device);
+           localListChanged = true;
+       } else {
+           // Only update if properties changed
+           final existing = _discoveredControllers[discIdx];
+           if (existing.ip != device.ip || existing.name != device.name || existing.universe != device.universe) {
+                _discoveredControllers[discIdx] = device;
+                localListChanged = true;
+           }
+       }
+
+       // Deduplicate against STATE using ID (Serial Number + IP)
+       final existingIndex = showState.fixtures.indexWhere((f) => f.id == device.id);
+       
+       if (existingIndex == -1) {
+           // Add NEW
+           // Layout Logic: Vertical-First (Columns)
+           const double kSlotSize = 200.0;
+           const int kItemsPerCol = 6;
+           
+           // Use current count from STATE
+           final int index = showState.fixtures.length; 
+           final int col = index ~/ kItemsPerCol;
+           final int row = index % kItemsPerCol;
+           
+           final double posX = 100.0 + (col * kSlotSize);
+           final double posY = 100.0 + (row * kSlotSize);
+
+           // Use Device Universe directly
+           final positionedDevice = device.copyWith(
+              x: posX,
+              y: posY,
+           );
+           
+           showState.addFixture(positionedDevice);
+           debugPrint("Discovered: ${positionedDevice.name} @ ${positionedDevice.ip} -> Univ:${positionedDevice.universe} (ID: ${positionedDevice.id})");
+       } else {
+           // Update EXISTING only if actually changed
+           final existing = showState.fixtures[existingIndex];
+           // Update if Universe/Name/IP changed (e.g. better packet arrived)
+           if (existing.universe != device.universe || existing.name != device.name || existing.ip != device.ip) {
+              final updated = existing.copyWith(
+                 universe: device.universe,
+                 name: device.name,
+                 ip: device.ip,
+              );
+              showState.updateFixture(updated);
+              debugPrint("Updated Fixture: ${updated.name} -> Univ:${updated.universe}");
+           }
+       }
+       
+       // Only setState if the local discovered list changed (visual update needed for non-patched items)
+       // OR if we just added a new fixture (though showState handles that notification generally, setState helps UI refresh)
+       if (localListChanged) {
+           setState(() {});
+       }
     });
+
+    await _discoveryService.startDiscovery(interfaceIp: bindIp);
   }
 
   void _stopScan() {
+    debugPrint("Stopping Scan... Discovered Count: ${_discoveredControllers.length}");
+    _scanTimeoutTimer?.cancel();
     _discoveryService.stopDiscovery();
     _scanSub?.cancel();
     if (mounted) setState(() => _isScanning = false);
+    
+    // Auto-poll rotation after scan stops
+    debugPrint("Triggering Rotation Polling...");
+    _pollRotations();
+  }
+
+  void _pollRotations() async {
+      debugPrint("Poll Rotations: Traversing ${_discoveredControllers.length} controllers.");
+      for (var fixture in _discoveredControllers) {
+          String? sourceIp;
+          if (_selectedInterface != null && _selectedInterface!.addresses.isNotEmpty) {
+               sourceIp = _selectedInterface!.addresses.first.address;
+          }
+          debugPrint("Polling Rotation for ${fixture.ip} (Source: $sourceIp)");
+          
+          final rotIdx = await _discoveryService.getRotation(fixture.ip, sourceIp: sourceIp);
+          
+          if (rotIdx != null && mounted) {
+              debugPrint("Received Rotation Index $rotIdx for ${fixture.ip}");
+              // Map Index to Degrees
+              double newRot = 0;
+              if (rotIdx >= 0 && rotIdx <= 3) {
+                  newRot = rotIdx * 90.0;
+              }
+              
+              // Update State
+              final showState = Provider.of<ShowState>(context, listen: false);
+              
+              // Update in Discovered List
+              final idx = _discoveredControllers.indexWhere((c) => c.id == fixture.id);
+              if (idx != -1) {
+                  final updated = _discoveredControllers[idx].copyWith(rotation: newRot);
+                   setState(() {
+                       _discoveredControllers[idx] = updated;
+                       if (_selectedDiscoveredController?.id == fixture.id) {
+                           _selectedDiscoveredController = updated;
+                       }
+                   });
+              }
+              
+              // Update in Main State
+              final fIdx = showState.fixtures.indexWhere((f) => f.id == fixture.id);
+              if (fIdx != -1) {
+                  final existing = showState.fixtures[fIdx];
+                  if (existing.rotation != newRot) {
+                      showState.updateFixture(existing.copyWith(rotation: newRot));
+                  }
+              }
+          }
+      }
   }
 
   void _selectFixture(Fixture? f, {bool patched = true}) {
     if (!mounted) return;
+    
+    final showState = Provider.of<ShowState>(context, listen: false);
+
+
+
+    // Resolve Old Selection
+    Fixture? oldF;
+    if (_selectedFixtureId != null) {
+        try {
+           oldF = showState.fixtures.firstWhere((fx) => fx.id == _selectedFixtureId);
+        } catch (_) {}
+    } else {
+        oldF = _selectedDiscoveredController;
+    }
+
     setState(() {
        // Check if re-selecting the same fixture
        final bool sameSelection = patched 
@@ -206,29 +344,69 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
        if (f != null) {
           _nameCtrl.text = f.name;
           _ipCtrl.text = f.ip;
-          _dmxCtrl.text = f.dmxAddress.toString();
-          _univCtrl.text = f.universe.toString();
-          _rotCtrl.text = f.rotation.toString();
+          // _rotCtrl removed
        }
     });
+
+    // Handle Feedback Lights (Continuous V2)
+    _feedbackTimer?.cancel();
+    
+    // 1. Turn OFF Old (Send one Blackout frame?)
+    // User said "turn off the transmission". Usually fixtures timeout to black or hold.
+    // Let's send one black frame to be clean.
+    if (oldF != null && oldF.id != f?.id) {
+         List<int> black = List.filled(512, 0);
+         _discoveryService.sendDmxFrameV2(oldF.ip, black);
+    }
+    
+    // 2. Turn ON New (Continuous)
+    if (f != null) {
+        // Construct Data: Pixel 1 Red, Rest Blue
+        List<int> colors = [];
+        for (int i = 0; i < 170; i++) {
+           if (i == 0) colors.addAll([255, 0, 0]); 
+           else colors.addAll([0, 0, 255]);
+        }
+        
+        _feedbackTimer = Timer.periodic(const Duration(milliseconds: 30), (timer) {
+            if (!mounted) { timer.cancel(); return; }
+            _discoveryService.sendDmxFrameV2(f.ip, colors);
+        });
+    }
   }
 
-  void _rotateFixture(Fixture f, ShowState state) {
-     final newRot = (f.rotation + 90) % 360;
-      setState(() {
-         if (_selectedDiscoveredController != null && _selectedDiscoveredController!.id == f.id) {
-            final index = _discoveredControllers.indexWhere((d) => d.id == f.id);
-            if (index != -1) {
-               final newF = f.copyWith(rotation: newRot);
-               _discoveredControllers[index] = newF;
-               _selectedDiscoveredController = newF; 
-               _rotCtrl.text = newRot.toString();
-            }
-        } else {
-           state.updateFixturePosition(f.id, f.x, f.y, newRot);
-           _rotCtrl.text = newRot.toString();
-        }
-     });
+  void _rotateFixture(Fixture f, bool clockwise) async {
+       // Map current rotation to index 0-3
+       int currentIdx = (f.rotation / 90).round();
+       int newIdx = clockwise ? (currentIdx + 1) : (currentIdx - 1);
+       if (newIdx > 3) newIdx = 0;
+       if (newIdx < 0) newIdx = 3;
+       
+       double newRot = newIdx * 90.0;
+       
+       debugPrint("Rotating ${f.ip} to Index $newIdx ($newRot deg)");
+
+       String? sourceIp;
+       if (_selectedInterface != null && _selectedInterface!.addresses.isNotEmpty) {
+           sourceIp = _selectedInterface!.addresses.first.address;
+       }
+       
+       await _discoveryService.setRotation(f.ip, newIdx, f.macAddress, sourceIp: sourceIp);
+       
+       // Update Local State
+       final updated = f.copyWith(rotation: newRot);
+       final showState = Provider.of<ShowState>(context, listen: false);
+       showState.updateFixture(updated);
+       
+       setState(() {
+          final idx = _discoveredControllers.indexWhere((c) => c.id == f.id);
+          if (idx != -1) {
+             _discoveredControllers[idx] = updated;
+             if (_selectedDiscoveredController?.id == f.id) {
+                 _selectedDiscoveredController = updated;
+             }
+          }
+       });
   }
 
   void _onDragStart(Fixture f, DragStartDetails details) {
@@ -236,7 +414,6 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
       setState(() {
         _enablePan = false;
         _dragStartPos = Offset(f.x, f.y);
-        _lastLocalPos = details.localPosition;
         _dragAccumulator = Offset.zero;
         _selectFixture(f, patched: _discoveredControllers.indexWhere((d)=>d.id==f.id) == -1);
       });
@@ -305,7 +482,6 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
       setState(() {
          _enablePan = true;
          _dragStartPos = null;
-         _lastLocalPos = null;
       });
   }
 
@@ -333,30 +509,35 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
   }
 
   void _updateFixtureLocation(Fixture f, double x, double y, ShowState state) {
-      if (_selectedDiscoveredController != null && _selectedDiscoveredController!.id == f.id) {
-         final index = _discoveredControllers.indexWhere((d) => d.id == f.id);
-         if (index != -1) {
-            setState(() {
-               final newF = f.copyWith(x: x, y: y);
-               _discoveredControllers[index] = newF;
-               _selectedDiscoveredController = newF;
-            });
-         }
-      } else {
-         state.updateFixturePosition(f.id, x, y, f.rotation);
-         // Controllers Update removed
+      // 1. Try updating Discovered fixture (Local State)
+      final discIndex = _discoveredControllers.indexWhere((d) => d.id == f.id);
+      if (discIndex != -1) {
+          setState(() {
+             final newF = _discoveredControllers[discIndex].copyWith(x: x, y: y);
+             _discoveredControllers[discIndex] = newF;
+             
+             // Update selection if matches
+             if (_selectedDiscoveredController?.id == f.id) {
+                _selectedDiscoveredController = newF;
+             }
+          });
+      }
+      
+      // 2. Try updating Patched fixture (Show State)
+      // Check if it exists in ShowState before calling update
+      if (state.currentShow?.fixtures.any((fix) => fix.id == f.id) == true) {
+          state.updateFixturePosition(f.id, x, y, f.rotation);
       }
   }
 
   void _onDragUpdate(Fixture f, DragUpdateDetails details, ShowState state) {
-      if (_dragStartPos == null || _lastLocalPos == null) return;
+      if (_dragStartPos == null) return;
       
-      // Calculate delta manually from localPosition to get scene coordinates
-      final Offset currentLocal = details.localPosition;
-      final Offset localDelta = currentLocal - _lastLocalPos!;
-      _lastLocalPos = currentLocal;
+      // Delta is already in local/scene coordinates because GestureDetector is inside the InteractiveViewer
+      final Offset sceneDelta = details.delta; 
+      // debugPrint("DragUpdate: ${f.id} Delta: $sceneDelta");
       
-      _dragAccumulator += localDelta; 
+      _dragAccumulator += sceneDelta; 
       
       final newRawPos = _dragStartPos! + _dragAccumulator;
       
@@ -385,7 +566,9 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
   void _fitToScreen(List<Fixture> fixtures, BoxConstraints constraints) {
       double minX, minY, maxX, maxY;
       
-      if (fixtures.isEmpty) {
+      final allFixtures = [...fixtures, ..._discoveredControllers];
+
+      if (allFixtures.isEmpty) {
           // Empty Canvas: Fit the whole workspace
           minX = 0;
           minY = 0;
@@ -395,7 +578,7 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
           minX = double.infinity; minY = double.infinity;
           maxX = double.negativeInfinity; maxY = double.negativeInfinity;
           
-          for (var f in fixtures) {
+          for (var f in allFixtures) {
              if (f.x < minX) minX = f.x;
              if (f.y < minY) minY = f.y;
              if (f.x + (f.width*kStride) > maxX) maxX = f.x + (f.width*kStride); 
@@ -645,9 +828,6 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
       _isEditingProperties = true;
       _nameCtrl.text = f.name;
       _ipCtrl.text = f.ip;
-      _dmxCtrl.text = f.dmxAddress.toString();
-      _univCtrl.text = f.universe.toString();
-      _rotCtrl.text = f.rotation.toString();
     });
   }
 
@@ -658,7 +838,8 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
     });
   }
 
-  void _saveProperties(ShowState showState) {
+
+  void _saveProperties(ShowState showState) async {
     final selectedFixture = _selectedFixtureId != null
         ? showState.currentShow?.fixtures.firstWhere((f) => f.id == _selectedFixtureId)
         : _selectedDiscoveredController;
@@ -667,20 +848,31 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
 
     final newName = _nameCtrl.text;
     final newIp = _ipCtrl.text;
-    final newDmx = int.tryParse(_dmxCtrl.text) ?? selectedFixture.dmxAddress;
-    final newUniv = int.tryParse(_univCtrl.text) ?? selectedFixture.universe;
-    // Fix Type Error
-    final newRot = double.tryParse(_rotCtrl.text) ?? selectedFixture.rotation;
+    // Rotation removed from manual editor
+
+    // Send UDP Config Commands if changed
+    if (newName != selectedFixture.name) {
+       await _discoveryService.setControllerName(selectedFixture.ip, newName, selectedFixture.macAddress);
+    }
+    // IP Change is risky - do last
+    if (newIp != selectedFixture.ip) {
+       String? sourceIp;
+       if (_selectedInterface != null && _selectedInterface!.addresses.isNotEmpty) {
+          sourceIp = _selectedInterface!.addresses.first.address;
+       }
+       await _discoveryService.setIpAddress(selectedFixture.ip, newIp, selectedFixture.macAddress, sourceIp: sourceIp);
+    }
+    
+    // Rotation handled via Context Menu only now.
 
     final updatedFixture = selectedFixture.copyWith(
       name: newName,
       ip: newIp,
-      dmxAddress: newDmx,
-      universe: newUniv,
-      rotation: newRot,
+      // Keep existing rotation
     );
 
     setState(() {
+       // ... existing update logic ...
       if (_selectedFixtureId != null) {
         showState.updateFixture(updatedFixture);
       } else if (_selectedDiscoveredController != null) {
@@ -710,9 +902,14 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
           onTap: () => WidgetsBinding.instance.addPostFrameCallback((_) => _enterEditMode(f)),
         ),
         PopupMenuItem(
-          value: 'rotate',
-          child: const Text('Rotate 90°'),
-          onTap: () => WidgetsBinding.instance.addPostFrameCallback((_) => _rotateFixture(f, showState)),
+          value: 'rotate_cw',
+          child: const Text('Rotate 90° CW'),
+          onTap: () => WidgetsBinding.instance.addPostFrameCallback((_) => _rotateFixture(f, true)),
+        ),
+        PopupMenuItem(
+          value: 'rotate_ccw',
+          child: const Text('Rotate 90° CCW'),
+          onTap: () => WidgetsBinding.instance.addPostFrameCallback((_) => _rotateFixture(f, false)),
         ),
         if (_selectedDiscoveredController?.id == f.id)
           PopupMenuItem(
@@ -730,14 +927,14 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
           ),
         if (_selectedFixtureId == f.id)
           PopupMenuItem(
-            value: 'unpatch',
-            child: const Text('Unpatch Controller'),
+            value: 'delete',
+            child: const Text('Delete Controller'),
             onTap: () => WidgetsBinding.instance.addPostFrameCallback((_) {
               showState.removeFixture(f.id);
               setState(() {
                 _selectedFixtureId = null;
               });
-              if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("${f.name} unpatched.")));
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("${f.name} deleted.")));
             }),
           ),
       ],
@@ -821,22 +1018,15 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
                            : ListView(
                            padding: EdgeInsets.zero,
                            children: [
-                              // 1. Discovery Controls (Top)
-                              _buildNetworkControls(showState),
-                              
-                              const Divider(height: 1, color: Colors.white12),
-
-                              // 2. Grid Management
+                              // 1. Grid Management (Moved to Top)
                               _buildGridControls(context, showState, fixtures),
 
                               const Divider(height: 1, color: Colors.white12),
                               
-                              const Divider(height: 1, color: Colors.white12),
-                              
-                              // 2. Selected Properties REMOVED per user request
-                              
-                              // 3. Device Stats (Bottom)
-                              _buildDeviceStats(fixtures, showState),
+                              // 2. Discovery & Stats Group
+                              _buildNetworkControls(showState),
+                              // No divider between Network and Stats to "group" them visually as requested
+                              _buildDeviceStats(showState),
                               
                               const SizedBox(height: 40),
                            ],
@@ -877,7 +1067,7 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
                            minScale: 0.1,
                            maxScale: 5.0,
                            constrained: false, // Infinite canvas (but we limit content)
-                           panEnabled: true, // Always allow panning
+                           panEnabled: _enablePan, // Bind to state allow disabling during drag
                            scaleEnabled: true,
                            child: Listener(
                                 onPointerDown: (e) {
@@ -924,8 +1114,9 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
                                     if (selectedFixture != null && _selectedFixtureId != null)
                                        _buildPositionedFixture(selectedFixture, showState, true, key: ValueKey("patched_${selectedFixture.id}")),
                                        
-                                    // 4. Discovered (Transient)
-                                    ..._discoveredControllers.map((f) => _buildPositionedDiscovered(f, showState, key: ValueKey("disc_${f.id}"))),
+                                    // 4. Discovered (Transient) - Filter out already patched
+                                    ..._discoveredControllers.where((d) => !fixtures.any((patch) => patch.id == d.id))
+                                       .map((f) => _buildPositionedDiscovered(f, showState, key: ValueKey("disc_${f.id}"))),
                                  ],
                               )),
                            ),
@@ -966,84 +1157,42 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
                       style: const TextStyle(color: Colors.white, fontSize: 12),
                       icon: const Icon(Icons.arrow_drop_down, size: 16, color: Colors.white54),
                       items: _interfaces.map((iface) => DropdownMenuItem(value: iface, child: Text(iface.name, overflow: TextOverflow.ellipsis))).toList(),
-                      onChanged: (val) => setState(() => _selectedInterface = val),
+                      onChanged: (val) {
+                         setState(() => _selectedInterface = val);
+                         if (val != null) {
+                            SharedPreferences.getInstance().then((prefs) {
+                               prefs.setString(kPrefNetworkInterface, val.name);
+                            });
+                         }
+                      },
                     ),
                   ),
                 ),
                 const SizedBox(height: 12),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton.icon(
-                    onPressed: () { 
-                       debugPrint("Scan Button Pressed. ${_isScanning ? "Stopping" : "Starting"}");
-                       _isScanning ? _stopScan() : _startScan(showState); 
-                    },
-                     icon: Icon(_isScanning ? Icons.stop : Icons.radar, size: 16),
-                     label: Text(_isScanning ? "STOP SCANNING" : "SCAN FOR CONTROLLERS"),
-                     style: FilledButton.styleFrom(
-                        backgroundColor: _isScanning ? Colors.redAccent : const Color(0xFF64FFDA),
-                        foregroundColor: _isScanning ? Colors.white : Colors.black,
-                     ),
-                   ),
-                 ),
-                 const SizedBox(height: 8),
-                 // Grid Lock Toggle
-                 Row(
-                    children: [
-                       const Text("GRID LOCK", style: TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.bold)),
-                       const SizedBox(width: 12), // Moved closer
-                       Transform.scale(
-                         scale: 0.8, // Smaller switch
-                         child: Switch(
-                            value: showState.isGridLocked,
-                            onChanged: (v) {
-                               showState.setGridLock(v);
-                               if (v) {
-                                  // Grid Bounds Logic ...
-                                  final fixtures = showState.currentShow?.fixtures ?? [];
-                                  if (fixtures.isNotEmpty) {
-                                     double minX = double.infinity; double minY = double.infinity;
-                                     double maxX = double.negativeInfinity; double maxY = double.negativeInfinity;
-                                     for (final f in fixtures) {
-                                        final bounds = _getVisualBounds(f);
-                                        if (bounds.left < minX) minX = bounds.left;
-                                        if (bounds.top < minY) minY = bounds.top;
-                                        if (bounds.right > maxX) maxX = bounds.right;
-                                        if (bounds.bottom > maxY) maxY = bounds.bottom;
-                                     }
-                                     if (minX != double.infinity) {
-                                        showState.updateGridBounds(maxX - minX, maxY - minY);
-                                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Grid Set: ${(maxX - minX).ceil()} x ${(maxY - minY).ceil()}")));
-                                     }
-                                  }
-                               }
-                            },
-                            activeColor: const Color(0xFF64FFDA),
+                  SizedBox(
+                   width: double.infinity,
+                   child: TextButton.icon(
+                     onPressed: () { 
+                        debugPrint("Scan Button Pressed. ${_isScanning ? "Stopping" : "Starting"}");
+                        _isScanning ? _stopScan() : _startScan(showState); 
+                     },
+                      icon: Icon(_isScanning ? Icons.stop : Icons.radar, size: 16, color: _isScanning ? Colors.redAccent : const Color(0xFF90CAF9)),
+                      label: Text(_isScanning ? "STOP SCANNING" : "SCAN FOR CONTROLLERS", style: TextStyle(color: _isScanning ? Colors.redAccent : Colors.white)),
+                      style: TextButton.styleFrom(
+                         backgroundColor: Colors.white10,
+                         padding: const EdgeInsets.symmetric(vertical: 12),
+                         shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            side: BorderSide(color: _isScanning ? Colors.redAccent.withOpacity(0.5) : Colors.white24, width: 1),
                          ),
-                       ),
-                       const SizedBox(width: 8),
-                       // Fit Button
-                       SizedBox(
-                          width: 40, height: 40, // Increased touch target
-                          child: IconButton(
-                             padding: EdgeInsets.zero,
-                             tooltip: "Fit View", // Updated Tooltip
-                             icon: const Icon(Icons.fit_screen, size: 28, color: Colors.white70), // Increased size
-                             onPressed: () {
-                                final fixtures = showState.currentShow?.fixtures ?? [];
-                                if (fixtures.isNotEmpty && _lastCanvasConstraints != null) {
-                                   _fitToScreen(fixtures, _lastCanvasConstraints!);
-                                }
-                             },
-                          ),
-                       ),
-                       const Spacer(), // Push everything to the left side of the container
-                    ],
-                 ),
+                      ),
+                    ),
+                  ),
+                 // Grid Lock & Fit moved to Grid Management
                 if (_isScanning)
                    Padding(
                      padding: const EdgeInsets.only(top: 8),
-                     child: LinearProgressIndicator(backgroundColor: Colors.transparent, color: const Color(0xFF64FFDA), minHeight: 2),
+                     child: LinearProgressIndicator(backgroundColor: Colors.transparent, color: const Color(0xFF90CAF9), minHeight: 2),
                    ),
              ],
           ),
@@ -1065,7 +1214,27 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
               style: const TextStyle(color: Colors.white, fontSize: 13),
               decoration: InputDecoration(
                  filled: true, fillColor: Colors.white10,
-                 isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: BorderSide.none)
+                 isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: BorderSide.none),
+                 suffixIcon: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                       IconButton(
+                          icon: const Icon(Icons.close, size: 16, color: Colors.redAccent),
+                          tooltip: "Revert Name",
+                          onPressed: () {
+                              final f = _selectedFixtureId != null
+                                  ? showState.currentShow?.fixtures.firstWhere((fx) => fx.id == _selectedFixtureId)
+                                  : _selectedDiscoveredController;
+                              if (f != null) _nameCtrl.text = f.name;
+                          },
+                       ),
+                       IconButton(
+                          icon: const Icon(Icons.send, size: 16, color: Colors.blueAccent),
+                          tooltip: "Update Name",
+                          onPressed: () => _saveProperties(showState),
+                       ),
+                    ],
+                 ),
               ),
            ),
            const SizedBox(height: 16),
@@ -1078,65 +1247,58 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
               style: const TextStyle(color: Colors.white, fontSize: 13),
               decoration: InputDecoration(
                  filled: true, fillColor: Colors.white10,
-                 isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: BorderSide.none)
+                 isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: BorderSide.none),
+                 suffixIcon: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                       IconButton(
+                          icon: const Icon(Icons.close, size: 16, color: Colors.redAccent),
+                          tooltip: "Revert IP",
+                          onPressed: () {
+                              final f = _selectedFixtureId != null
+                                  ? showState.currentShow?.fixtures.firstWhere((fx) => fx.id == _selectedFixtureId)
+                                  : _selectedDiscoveredController;
+                              if (f != null) _ipCtrl.text = f.ip;
+                          },
+                       ),
+                       IconButton(
+                          icon: const Icon(Icons.send, size: 16, color: Colors.blueAccent),
+                          tooltip: "Update IP",
+                          onPressed: () => _saveProperties(showState),
+                       ),
+                    ],
+                 ),
               ),
            ),
            const SizedBox(height: 16),
            
-           // DMX
-           Row(
-              children: [
-                 Expanded(child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                       const Text("UNIVERSE", style: TextStyle(color: Colors.white38, fontSize: 10)),
-                       const SizedBox(height: 4),
-                       TextField(
-                          controller: _univCtrl,
-                          keyboardType: TextInputType.number,
-                          style: const TextStyle(color: Colors.white, fontSize: 13),
-                          decoration: InputDecoration(
-                             filled: true, fillColor: Colors.white10,
-                             isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: BorderSide.none)
-                          ),
-                       ),
-                    ],
-                 )),
-                 const SizedBox(width: 12),
-                 Expanded(child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                       const Text("DMX ADDR", style: TextStyle(color: Colors.white38, fontSize: 10)),
-                       const SizedBox(height: 4),
-                       TextField(
-                          controller: _dmxCtrl,
-                          keyboardType: TextInputType.number,
-                          style: const TextStyle(color: Colors.white, fontSize: 13),
-                          decoration: InputDecoration(
-                             filled: true, fillColor: Colors.white10,
-                             isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: BorderSide.none)
-                          ),
-                       ),
-                    ],
-                 )),
-              ],
-           ),
+           const SizedBox(height: 16),
+           // DMX / Universe Removed
+
            const SizedBox(height: 16),
 
-           // Rotation
-           const Text("ROTATION", style: TextStyle(color: Colors.white38, fontSize: 10)),
+           // MAC (ReadOnly)
+           const Text("MAC ADDRESS", style: TextStyle(color: Colors.white38, fontSize: 10)),
            const SizedBox(height: 4),
-           TextField(
-              controller: _rotCtrl,
-              keyboardType: TextInputType.number,
-              style: const TextStyle(color: Colors.white, fontSize: 13),
-              decoration: InputDecoration(
-                 filled: true, fillColor: Colors.white10,
-                 isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: BorderSide.none)
+           Container(
+              padding: const EdgeInsets.all(10),
+              width: double.infinity,
+              decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(4)),
+              child: Text(
+                 (() {
+                    String val = "00:00:00:00:00:00";
+                    if (_selectedFixtureId != null) {
+                       val = showState.currentShow?.fixtures.firstWhere((f)=>f.id==_selectedFixtureId, orElse: ()=>Fixture(id:"", name: "Unknown", ip: "0.0.0.0", port: 6038, protocol: "KiNET", width: 1, height: 1, pixels: [])).macAddress ?? "00:00:00:00:00:00";
+                    } else {
+                       val = _selectedDiscoveredController?.macAddress ?? "00:00:00:00:00:00";
+                    }
+                    return val.isEmpty ? "00:00:00:00:00:00" : val;
+                 })(),
+                 style: const TextStyle(color: Colors.white38, fontSize: 11)
               ),
            ),
            const SizedBox(height: 16),
-
+           
            // Serial (ReadOnly)
            const Text("SERIAL NO.", style: TextStyle(color: Colors.white38, fontSize: 10)),
            const SizedBox(height: 4),
@@ -1146,41 +1308,35 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
               decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(4)),
               child: Text(_selectedFixtureId ?? _selectedDiscoveredController?.id ?? "N/A", style: const TextStyle(color: Colors.white38, fontSize: 11)),
            ),
+           const SizedBox(height: 16),
+
+           // Firmware (ReadOnly)
+           const Text("FIRMWARE VERSION", style: TextStyle(color: Colors.white38, fontSize: 10)),
+           const SizedBox(height: 4),
+           Container(
+              padding: const EdgeInsets.all(10),
+              width: double.infinity,
+              decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(4)),
+              child: Text(
+                 (() {
+                    String val = "N/A";
+                    if (_selectedFixtureId != null) {
+                       val = showState.currentShow?.fixtures.firstWhere((f)=>f.id==_selectedFixtureId, orElse: ()=>Fixture(id:"", name: "Unknown", ip: "0.0.0.0", port: 6038, protocol: "KiNET", width: 1, height: 1, pixels: [])).firmwareVersion ?? "N/A";
+                    } else {
+                       val = _selectedDiscoveredController?.firmwareVersion ?? "N/A";
+                    }
+                    return val.isEmpty ? "N/A" : val;
+                 })(),
+                 style: const TextStyle(color: Colors.white38, fontSize: 11)
+              ),
+           ),
            
-           const SizedBox(height: 40),
+           const SizedBox(height: 16),
            
-           // Buttons
-           Row(
-              children: [
-                 Expanded(
-                    child: TextButton(
-                       onPressed: _exitEditMode,
-                       style: TextButton.styleFrom(
-                          foregroundColor: Colors.white70,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: BorderSide(color: Colors.white12))
-                       ),
-                       child: const Text("CANCEL"),
-                    ),
-                 ),
-                 const SizedBox(width: 12),
-                 Expanded(
-                    child: FilledButton(
-                       onPressed: () => _saveProperties(showState),
-                       style: FilledButton.styleFrom(
-                          backgroundColor: const Color(0xFF64FFDA),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))
-                       ),
-                       child: const Text("UPDATE"),
-                    ),
-                 ),
-              ],
-           )
+           // Buttons Removed (Per User Request - Individual Actions Only)
         ],
-     );
-  }
+      );
+   }
 
   Widget _buildGridControls(BuildContext context, ShowState showState, List<Fixture> fixtures) {
       final bool hasFixtures = fixtures.isNotEmpty;
@@ -1190,7 +1346,7 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-               const Text("GRID MANAGEMENT", style: TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.bold)),
+               const Text("GRID", style: TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.bold)),
                const SizedBox(height: 8),
                Row(
                   children: [
@@ -1228,6 +1384,59 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
                      ),
                   ],
                ),
+               const SizedBox(height: 12),
+               // Grid Lock & Fit Controls
+                 Row(
+                    children: [
+                       const Text("GRID LOCK", style: TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.bold)),
+                       const SizedBox(width: 12),
+                       Transform.scale(
+                         scale: 0.8, 
+                         child: Switch(
+                            value: showState.isGridLocked,
+                            onChanged: (v) {
+                               showState.setGridLock(v);
+                               if (v) {
+                                  // Grid Bounds Logic
+                                  final fixtures = showState.currentShow?.fixtures ?? [];
+                                  if (fixtures.isNotEmpty) {
+                                     double minX = double.infinity; double minY = double.infinity;
+                                     double maxX = double.negativeInfinity; double maxY = double.negativeInfinity;
+                                     for (final f in fixtures) {
+                                        final bounds = _getVisualBounds(f);
+                                        if (bounds.left < minX) minX = bounds.left;
+                                        if (bounds.top < minY) minY = bounds.top;
+                                        if (bounds.right > maxX) maxX = bounds.right;
+                                        if (bounds.bottom > maxY) maxY = bounds.bottom;
+                                     }
+                                     if (minX != double.infinity) {
+                                        showState.updateGridBounds(maxX - minX, maxY - minY);
+                                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Grid Set: ${(maxX - minX).ceil()} x ${(maxY - minY).ceil()}")));
+                                     }
+                                  }
+                               }
+                            },
+                            activeColor: const Color(0xFF90CAF9),
+                         ),
+                       ),
+                       const SizedBox(width: 8),
+                       // Fit Button
+                       SizedBox(
+                          width: 40, height: 40,
+                          child: IconButton(
+                             padding: EdgeInsets.zero,
+                             tooltip: "Fit View",
+                             icon: const Icon(Icons.fit_screen, size: 28, color: Colors.white70),
+                             onPressed: () {
+                                final fixtures = showState.currentShow?.fixtures ?? [];
+                                if (fixtures.isNotEmpty && _lastCanvasConstraints != null) {
+                                   _fitToScreen(fixtures, _lastCanvasConstraints!);
+                                }
+                             },
+                          ),
+                       ),
+                    ],
+                 ),
             ],
          ),
       );
@@ -1247,18 +1456,29 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
                   _selectFixture(f, patched: true);
                }
             },
-            child: GestureDetector(
-               behavior: HitTestBehavior.opaque,
-                onTap: () => _selectFixture(f, patched: true),
-                onLongPress: () => _enterEditMode(f),
-                onSecondaryTapUp: (details) => _showContextMenu(f, showState, details.globalPosition),
-                // Disable Drag/Pan if Locked OR Editing Properties
-                onPanStart: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragStart(f, d),
-                onPanUpdate: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragUpdate(f, d, showState),
-                onPanEnd: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragEnd(f, d, showState),
-                onPanCancel: (showState.isGridLocked || _isEditingProperties) ? null : () => _onDragEnd(f, null, showState),
-                child: _buildFixtureVisual(f, isSelected, showState.isGridLocked),
-             ),
+            child: Listener(
+               onPointerDown: (_) {
+                  if (!showState.isGridLocked && !_isEditingProperties) {
+                      setState(() => _enablePan = false);
+                  }
+               },
+               onPointerUp: (_) {
+                  setState(() => _enablePan = true);
+               },
+               onPointerCancel: (_) => setState(() => _enablePan = true),
+               child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                   onTap: () => _selectFixture(f, patched: true),
+                   onLongPress: () => _enterEditMode(f),
+                   onSecondaryTapUp: (details) => _showContextMenu(f, showState, details.globalPosition),
+                   // Disable Drag/Pan if Locked OR Editing Properties
+                   onPanStart: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragStart(f, d),
+                   onPanUpdate: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragUpdate(f, d, showState),
+                   onPanEnd: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragEnd(f, d, showState),
+                   onPanCancel: (showState.isGridLocked || _isEditingProperties) ? null : () => _onDragEnd(f, null, showState),
+                   child: _buildFixtureVisual(f, isSelected, showState.isGridLocked),
+                ),
+            ),
          ),
       );
   }
@@ -1277,31 +1497,42 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
                   _selectFixture(f, patched: false);
                }
             },
-            child: GestureDetector(
-               behavior: HitTestBehavior.opaque,
-                onTap: () => _selectFixture(f, patched: false),
-                onLongPress: () => _enterEditMode(f),
-                onSecondaryTapUp: (details) => _showContextMenu(f, showState, details.globalPosition),
-                // Disable Drag/Pan if Locked OR Editing Properties
-                onPanStart: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragStart(f, d),
-                onPanUpdate: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragUpdate(f, d, showState),
-                onPanEnd: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragEnd(f, d, showState),
-                onPanCancel: (showState.isGridLocked || _isEditingProperties) ? null : () => _onDragEnd(f, null, showState),
-                child: Opacity(
-                   opacity: 0.7, 
-                   child: _buildFixtureVisual(f, isSelected, showState.isGridLocked),
+            child: Listener(
+               onPointerDown: (_) {
+                  if (!showState.isGridLocked && !_isEditingProperties) {
+                      setState(() => _enablePan = false);
+                  }
+               },
+               onPointerUp: (_) => setState(() => _enablePan = true),
+               onPointerCancel: (_) => setState(() => _enablePan = true),
+               child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                   onTap: () => _selectFixture(f, patched: false),
+                   onLongPress: () => _enterEditMode(f),
+                   onSecondaryTapUp: (details) => _showContextMenu(f, showState, details.globalPosition),
+                   // Disable Drag/Pan if Locked OR Editing Properties
+                   onPanStart: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragStart(f, d),
+                   onPanUpdate: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragUpdate(f, d, showState),
+                   onPanEnd: (showState.isGridLocked || _isEditingProperties) ? null : (d) => _onDragEnd(f, d, showState),
+                   onPanCancel: (showState.isGridLocked || _isEditingProperties) ? null : () => _onDragEnd(f, null, showState),
+                   child: Opacity(
+                      opacity: 0.7, 
+                      child: _buildFixtureVisual(f, isSelected, showState.isGridLocked),
+                   ),
                 ),
-             ),
+            ),
          ),
       );
   }
 
-  Widget _buildDeviceStats(List<Fixture> fixtures, ShowState showState) {
+  Widget _buildDeviceStats(ShowState showState) {
       int count10x10 = 0;
       int count5x5 = 0;
       int countOther = 0;
       
-      for (var f in fixtures) {
+      final all = showState.fixtures;
+
+      for (var f in all) {
          if (f.width == 10 && f.height == 10) count10x10++;
          else if (f.width == 5 && f.height == 5) count5x5++;
          else countOther++;
@@ -1311,8 +1542,6 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
                // Auto-Fit Button
-
-               const Divider(height: 1, color: Colors.white12),
 
               // Stats
               Padding(
@@ -1328,7 +1557,7 @@ class _SetupTabState extends State<SetupTab> with TickerProviderStateMixin {
                        const SizedBox(height: 4),
                        if (countOther > 0) _buildStatRow("Other Sizes", countOther),
                        const SizedBox(height: 12),
-                       Text("Total: ${fixtures.length}", style: const TextStyle(color: Color(0xFF64FFDA), fontWeight: FontWeight.bold)),
+                       Text("Total: ${all.length}", style: const TextStyle(color: Color(0xFF90CAF9), fontWeight: FontWeight.bold, fontSize: 11)),
                     ],
                  ),
               ),
